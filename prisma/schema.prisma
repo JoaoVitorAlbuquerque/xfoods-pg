@@ -1,0 +1,148 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id       String @id @default(uuid()) @db.Uuid
+  name     String
+  email    String @unique
+  password String
+
+  leads              Lead[]
+  categories         Category[]
+  ingredients        Ingredient[]
+  products           Product[]
+  orders             Order[]
+  productIngredients ProductIngredient[]
+  productOrders      ProductOrder[]
+
+  @@map("users")
+}
+
+model Lead {
+  id      String  @id @default(uuid()) @db.Uuid
+  userId  String  @map("user_id") @db.Uuid
+  name    String
+  email   String? @unique
+  phone   String  @unique
+  address String
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders Order[]
+
+  @@map("leads")
+}
+
+model Category {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  name   String
+  icon   String
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  products Product[]
+
+  @@map("categories")
+}
+
+model Ingredient {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  name   String
+  icon   String
+
+  user     User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  products ProductIngredient[]
+
+  @@map("ingredients")
+}
+
+model Product {
+  id          String  @id @default(uuid()) @db.Uuid
+  userId      String  @map("user_id") @db.Uuid
+  categoryId  String? @map("category_id") @db.Uuid
+  name        String
+  description String
+  imagePath   String  @map("image_path")
+  price       Float
+  deleted     Boolean @default(false)
+
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category    Category?           @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  ingredients ProductIngredient[]
+  orders      ProductOrder[]
+
+  @@map("products")
+}
+
+enum OrderType {
+  WAITING
+  IN_PRODUCTION
+  DONE
+
+  @@map("order_type")
+}
+
+model Order {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  leadId      String?   @map("lead_id") @db.Uuid
+  table       Int
+  status      OrderType @default(WAITING)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  description String?
+  read        Boolean   @default(false)
+  restarted   Boolean   @default(false)
+  paid        Boolean   @default(false)
+
+  user     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lead     Lead?          @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  products ProductOrder[]
+
+  @@map("orders")
+}
+
+model ProductIngredient {
+  productId    String @map("product_id") @db.Uuid
+  ingredientId String @map("ingredient_id") @db.Uuid
+  userId       String @map("user_id") @db.Uuid
+
+  product    Product    @relation(fields: [productId], references: [id])
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id])
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([productId, ingredientId])
+  @@map("product_ingredient")
+}
+
+enum SizeType {
+  TINY
+  SMALL
+  MEAN
+  LARGE
+  EXTRA_LARGE
+  METER
+
+  @@map("size_type")
+}
+
+model ProductOrder {
+  userId    String @map("user_id") @db.Uuid
+  productId String @map("product_id") @db.Uuid
+  orderId   String @map("order_id") @db.Uuid
+
+  size     SizeType @default(MEAN)
+  quantity Int      @default(1)
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+  order   Order   @relation(fields: [orderId], references: [id])
+
+  @@id([orderId, productId])
+  @@map("product_order")
+}
