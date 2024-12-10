@@ -7,9 +7,10 @@ import { AuthModule } from './modules/auth/auth.module';
 import { AuthGuard } from './modules/auth/auth.guard';
 import { CategoriesModule } from './modules/categories/categories.module';
 import { IngredientsModule } from './modules/ingredients/ingredients.module';
+import { ProductsModule } from './modules/products/products.module';
 
 @Module({
-  imports: [UsersModule, DatabaseModule, AuthModule, CategoriesModule, IngredientsModule],
+  imports: [UsersModule, DatabaseModule, AuthModule, CategoriesModule, IngredientsModule, ProductsModule],
   controllers: [],
   providers: [
     {

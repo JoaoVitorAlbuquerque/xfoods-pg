@@ -107,14 +107,15 @@ model Order {
   @@map("orders")
 }
 
+// Tem que rodar o comando: prisma migrate dev
 model ProductIngredient {
-  productId    String @map("product_id") @db.Uuid
-  ingredientId String @map("ingredient_id") @db.Uuid
-  userId       String @map("user_id") @db.Uuid
+  productId    String  @map("product_id") @db.Uuid
+  ingredientId String  @map("ingredient_id") @db.Uuid
+  userId       String? @map("user_id") @db.Uuid
 
   product    Product    @relation(fields: [productId], references: [id])
   ingredient Ingredient @relation(fields: [ingredientId], references: [id])
-  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user       User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@id([productId, ingredientId])
   @@map("product_ingredient")
