@@ -142,7 +142,7 @@ model ProductOrder {
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id])
-  order   Order   @relation(fields: [orderId], references: [id])
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   @@id([orderId, productId])
   @@map("product_order")
