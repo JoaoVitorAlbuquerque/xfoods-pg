@@ -5,6 +5,7 @@ import { CategoriesRepository } from './repositories/categories.repositories';
 import { IngredientsRepository } from './repositories/ingredients.repositories';
 import { ProductsRepository } from './repositories/products.repositories';
 import { OrdersRepository } from './repositories/orders.repositories';
+import { LeadsRepository } from './repositories/leads.repositories';
 
 @Global()
 @Module({
@@ -15,6 +16,7 @@ import { OrdersRepository } from './repositories/orders.repositories';
     IngredientsRepository,
     ProductsRepository,
     OrdersRepository,
+    LeadsRepository,
   ],
   exports: [
     UsersRepository,
@@ -22,6 +24,7 @@ import { OrdersRepository } from './repositories/orders.repositories';
     IngredientsRepository,
     ProductsRepository,
     OrdersRepository,
+    LeadsRepository,
   ],
 })
 export class DatabaseModule {}

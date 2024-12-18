@@ -17,14 +17,13 @@ export class CreateOrderDto {
   @IsNotEmpty()
   table: number;
 
-  // @IsString()
-  // @IsNotEmpty()
-  // @IsEnum(OrderType)
-  // status: OrderType;
-
   @IsString()
   @IsOptional()
   description: string;
+
+  @IsString()
+  @IsOptional()
+  leadId: string;
 
   @IsEnum(OrderType)
   @IsOptional()
@@ -33,6 +32,10 @@ export class CreateOrderDto {
   @IsBoolean()
   @IsOptional()
   paid: boolean;
+
+  @IsOptional()
+  @IsArray()
+  orderIds: string[];
 
   @IsArray()
   @ValidateNested({ each: true })

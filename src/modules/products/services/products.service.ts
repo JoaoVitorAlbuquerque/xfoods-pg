@@ -92,7 +92,7 @@ export class ProductsService {
   ) {
     await this.validateProductOwnershipService.validate(userId, productId);
 
-    const { deleted } = updateProductDto;
+    const { deleted = true } = updateProductDto;
 
     return this.productsRepo.update({
       where: { id: productId },

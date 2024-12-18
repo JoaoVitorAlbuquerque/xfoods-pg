@@ -37,8 +37,12 @@ export class OrdersController {
   }
 
   @Get('history')
-  findAllHistory(@ActiveUserId() userId: string) {
-    return this.ordersService.findAllByUserIdHistory(userId);
+  findAllHistory(
+    @ActiveUserId() userId: string,
+    @Query('month', ParseIntPipe) month: number,
+    @Query('year', ParseIntPipe) year: number,
+  ) {
+    return this.ordersService.findAllByUserIdHistory(userId, { month, year });
   }
 
   @Get('financial')
@@ -62,6 +66,15 @@ export class OrdersController {
   // ) {
   //   return this.ordersService.update(userId, orderId, updateOrderDto);
   // }
+
+  @Patch('associate-lead')
+  associateLeadWithOrders(
+    @ActiveUserId() userId: string,
+    @Body('leadId', ParseUUIDPipe) leadId: string,
+    @Body('orderIds') orderIds: string[],
+  ) {
+    return this.ordersService.associateLeadWithOrders(userId, leadId, orderIds);
+  }
 
   @Patch(':orderId/order-status')
   async updateOrderStatus(

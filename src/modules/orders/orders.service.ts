@@ -3,12 +3,16 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { UpdateOrderDto } from './dto/update-order.dto';
 import { OrdersRepository } from 'src/shared/database/repositories/orders.repositories';
 import { ValidateOrderOwnershipService } from './services/validate-order-ownership.service';
+import { LeadsRepository } from 'src/shared/database/repositories/leads.repositories';
+import { ValidateLeadOwnershipService } from '../leads/services/validate-lead-ownership.service';
 
 @Injectable()
 export class OrdersService {
   constructor(
     private readonly ordersRepo: OrdersRepository,
     private readonly validateOrderOwnershipService: ValidateOrderOwnershipService,
+    private readonly validateLeadOwnershipService: ValidateLeadOwnershipService,
+    private readonly leadsRepo: LeadsRepository,
   ) {}
 
   async create(userId: string, createOrderDto: CreateOrderDto) {
@@ -44,20 +48,39 @@ export class OrdersService {
       include: {
         products: {
           include: {
-            product: true,
+            product: {
+              include: {
+                category: true,
+              },
+            },
           },
         },
       },
     });
   }
 
-  findAllByUserIdHistory(userId: string) {
+  findAllByUserIdHistory(
+    userId: string,
+    filters: { month: number; year: number },
+  ) {
     return this.ordersRepo.findMany({
-      where: { userId, restarted: true },
+      where: {
+        userId,
+        restarted: true,
+        createdAt: {
+          gte: new Date(Date.UTC(filters.year, filters.month)),
+          lt: new Date(Date.UTC(filters.year, filters.month + 1)),
+        },
+      },
       include: {
+        lead: true,
         products: {
           include: {
-            product: true,
+            product: {
+              include: {
+                category: true,
+              },
+            },
           },
         },
       },
@@ -115,6 +138,36 @@ export class OrdersService {
     });
   }
 
+  async associateLeadWithOrders(
+    userId: string,
+    leadId: string,
+    orderIds: string[],
+  ) {
+    // await this.validateOrderOwnershipService.validate(userId, orderIds);
+
+    // const { leadId } = updateOrderDto;
+
+    await this.ordersRepo.updateMany({
+      where: { id: { in: orderIds } },
+      data: {
+        leadId,
+      },
+    });
+
+    await this.validateLeadOwnershipService.validate(userId, leadId);
+
+    await this.leadsRepo.update({
+      where: { id: leadId },
+      data: {
+        orders: {
+          connect: orderIds.map((orderId) => ({ id: orderId })),
+        },
+      },
+    });
+
+    return { message: 'Orders successfully associated with the lead.' };
+  }
+
   async updateOrderRestarted(userId: string) {
     await this.ordersRepo.updateMany({
       where: { userId },
@@ -136,10 +189,18 @@ export class OrdersService {
   }
 
   async updateOrderPaid(userId: string, updateOrderDto: UpdateOrderDto) {
-    const { table, paid } = updateOrderDto;
+    const { paid, orderIds, table } = updateOrderDto;
+
+    // const orders = await this.ordersRepo.findMany({
+    //   where: { userId, id: { in: orderIds } },
+    // });
+
+    // if (orders.length !== orderIds.length) {
+    //   throw new Error('Some orders do not belong to this user');
+    // }
 
     await this.ordersRepo.updateMany({
-      where: { userId, table },
+      where: { userId, table, id: { in: orderIds } },
       data: { paid },
     });
 
