@@ -82,6 +82,13 @@ export class ProductsService {
   findProductsByCategory(userId: string, categoryId: string) {
     return this.productsRepo.findMany({
       where: { userId, categoryId, deleted: false },
+      include: {
+        ingredients: {
+          include: {
+            ingredient: true,
+          },
+        },
+      },
     });
   }
 
