@@ -88,6 +88,7 @@ export class ProductsService {
             ingredient: true,
           },
         },
+        category: true,
       },
     });
   }
