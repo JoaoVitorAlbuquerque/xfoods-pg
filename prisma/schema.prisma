@@ -37,6 +37,9 @@ model User {
   stockMovements     StockMovement[]
   stockCounts        StockCount[]
   stockSettings      StockSettings?
+  suppliers          Supplier[]
+  purchases          Purchase[]
+  supplyCostHistory  SupplyCostHistory[]
 
   @@map("users")
 }
@@ -86,9 +89,12 @@ model MeasurementUnit {
 
   user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  suppliesAsBaseUnit Supply[]
-  stockMovements     StockMovement[]
-  stockCountItems    StockCountItem[]
+  suppliesAsBaseUnit     Supply[]
+  stockMovements         StockMovement[]
+  stockCountItems        StockCountItem[]
+  purchaseItems          PurchaseItem[]
+  costHistoryEntries     SupplyCostHistory[]
+  suppliesAsLastPurchase Supply[]            @relation("SupplyLastPurchaseUnit")
 
   @@unique([userId, code])
   @@index([userId])
@@ -317,6 +323,18 @@ model Supply {
   averageCost Decimal  @default(0) @map("average_cost") @db.Decimal(14, 6)
   lastCost    Decimal? @map("last_cost") @db.Decimal(14, 6)
 
+  /// Qual custo vale como "custo atual" deste insumo. Só LAST_PURCHASE está
+  /// implementado; os demais existem para que trocar de método seja mudar um
+  /// campo, não reescrever quem valoriza saída. `averageCost` continua sendo
+  /// mantido a cada entrada, então AVERAGE já nasce com dado para usar.
+  costingMethod CostingMethod @default(LAST_PURCHASE) @map("costing_method")
+
+  /// Dados da última aquisição, para o relatório de variação de preço.
+  lastPurchaseAt        DateTime? @map("last_purchase_at")
+  lastSupplierId        String?   @map("last_supplier_id") @db.Uuid
+  lastPurchaseUnitPrice Decimal?  @map("last_purchase_unit_price") @db.Decimal(14, 6)
+  lastPurchaseUnitId    String?   @map("last_purchase_unit_id") @db.Uuid
+
   active Boolean @default(true)
 
   createdAt DateTime @default(now()) @map("created_at")
@@ -328,10 +346,25 @@ model Supply {
   movements  StockMovement[]
   countItems StockCountItem[]
 
+  lastSupplier     Supplier?           @relation("SupplyLastSupplier", fields: [lastSupplierId], references: [id], onDelete: SetNull)
+  lastPurchaseUnit MeasurementUnit?    @relation("SupplyLastPurchaseUnit", fields: [lastPurchaseUnitId], references: [id])
+  purchaseItems    PurchaseItem[]
+  costHistory      SupplyCostHistory[]
+
   @@unique([userId, name])
   @@index([userId, active])
   @@index([supplyCategoryId])
   @@map("supplies")
+}
+
+enum CostingMethod {
+  /// Custo atual = último preço pago. Único implementado nesta versão.
+  LAST_PURCHASE
+  AVERAGE
+  FIFO
+  BY_BATCH
+
+  @@map("costing_method")
 }
 
 enum StockMovementType {
@@ -389,7 +422,8 @@ model StockMovement {
   supply Supply          @relation(fields: [supplyId], references: [id])
   unit   MeasurementUnit @relation(fields: [unitId], references: [id])
 
-  countItem StockCountItem?
+  countItem    StockCountItem?
+  PurchaseItem PurchaseItem?
 
   @@index([userId, supplyId, occurredAt])
   @@index([userId, type])
@@ -475,4 +509,157 @@ model StockSettings {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("stock_settings")
+}
+
+// ===========================================================================
+// Compras, fornecedores e histórico de custo
+// ===========================================================================
+
+model Supplier {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+
+  name     String
+  document String?
+  phone    String?
+  email    String?
+  notes    String?
+  active   Boolean @default(true)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purchases      Purchase[]
+  suppliesAsLast Supply[]            @relation("SupplyLastSupplier")
+  costHistory    SupplyCostHistory[]
+
+  @@unique([userId, name])
+  @@index([userId])
+  @@map("suppliers")
+}
+
+enum PurchaseStatus {
+  DRAFT
+  CONFIRMED
+  CANCELED
+
+  @@map("purchase_status")
+}
+
+/// Nota de compra. Nasce DRAFT e não encosta no estoque; ao ser confirmada,
+/// cada item gera uma movimentação PURCHASE e atualiza o custo do insumo —
+/// tudo na mesma transação.
+model Purchase {
+  id         String  @id @default(uuid()) @db.Uuid
+  userId     String  @map("user_id") @db.Uuid
+  supplierId String? @map("supplier_id") @db.Uuid
+
+  documentNumber String?  @map("document_number")
+  issuedAt       DateTime @map("issued_at")
+  notes          String?
+
+  /// Soma dos itens, calculada — nunca informada pelo cliente. Frete e
+  /// desconto ainda não são modelados; quando forem, entram como linhas
+  /// próprias e este campo continua sendo a soma.
+  totalAmount Decimal @default(0) @map("total_amount") @db.Decimal(14, 2)
+
+  status      PurchaseStatus @default(DRAFT)
+  confirmedAt DateTime?      @map("confirmed_at")
+  canceledAt  DateTime?      @map("canceled_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  supplier Supplier?      @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  items    PurchaseItem[]
+
+  @@index([userId, issuedAt])
+  @@index([userId, status])
+  @@map("purchases")
+}
+
+model PurchaseItem {
+  id         String @id @default(uuid()) @db.Uuid
+  purchaseId String @map("purchase_id") @db.Uuid
+  supplyId   String @map("supply_id") @db.Uuid
+  unitId     String @map("unit_id") @db.Uuid
+
+  quantity     Decimal @db.Decimal(18, 6)
+  quantityBase Decimal @map("quantity_base") @db.Decimal(18, 6)
+
+  /// Preço por unidade comprada (R$/KG). Preservado para leitura humana.
+  unitPrice  Decimal @map("unit_price") @db.Decimal(14, 6)
+  totalPrice Decimal @map("total_price") @db.Decimal(14, 4)
+
+  /// Preço por unidade base (R$/G) — totalPrice / quantityBase. É este que
+  /// permite comparar compras feitas em unidades diferentes.
+  unitCostBase Decimal @map("unit_cost_base") @db.Decimal(14, 6)
+
+  batch     String?   @map("batch")
+  expiresAt DateTime? @map("expires_at")
+
+  /// Movimentação gerada na confirmação. Nulo enquanto a compra é rascunho.
+  movementId String? @unique @map("movement_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  purchase Purchase        @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  supply   Supply          @relation(fields: [supplyId], references: [id])
+  unit     MeasurementUnit @relation(fields: [unitId], references: [id])
+  movement StockMovement?  @relation(fields: [movementId], references: [id])
+
+  costHistory SupplyCostHistory?
+
+  @@index([supplyId])
+  @@index([purchaseId])
+  @@map("purchase_items")
+}
+
+enum CostSource {
+  PURCHASE
+  MANUAL
+  ADJUSTMENT
+
+  @@map("cost_source")
+}
+
+/// Histórico de custo do insumo. Append-only: cada compra confirmada acrescenta
+/// uma linha, e nenhuma anterior é sobrescrita. É o que sustenta o relatório de
+/// variação de preço e, mais adiante, o custo da ficha técnica na data.
+model SupplyCostHistory {
+  id       String @id @default(uuid()) @db.Uuid
+  userId   String @map("user_id") @db.Uuid
+  supplyId String @map("supply_id") @db.Uuid
+
+  /// Custo por unidade base. É o único campo comparável entre compras feitas
+  /// em unidades diferentes — comparar R$/KG com R$/G daria variação errada.
+  unitCostBase         Decimal  @map("unit_cost_base") @db.Decimal(14, 6)
+  previousUnitCostBase Decimal? @map("previous_unit_cost_base") @db.Decimal(14, 6)
+
+  /// Variação percentual contra o custo anterior, já calculada e congelada.
+  /// Nula na primeira compra, quando não há contra o que comparar.
+  variationPercent Decimal? @map("variation_percent") @db.Decimal(12, 4)
+
+  /// Preço e unidade como foram comprados, para o relatório mostrar
+  /// "R$ 35/kg" em vez de "R$ 0,035/g".
+  unitPrice Decimal @map("unit_price") @db.Decimal(14, 6)
+  unitId    String  @map("unit_id") @db.Uuid
+
+  source         CostSource @default(PURCHASE)
+  purchaseItemId String?    @unique @map("purchase_item_id") @db.Uuid
+  supplierId     String?    @map("supplier_id") @db.Uuid
+
+  effectiveAt DateTime @map("effective_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user         User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  supply       Supply          @relation(fields: [supplyId], references: [id])
+  unit         MeasurementUnit @relation(fields: [unitId], references: [id])
+  purchaseItem PurchaseItem?   @relation(fields: [purchaseItemId], references: [id], onDelete: SetNull)
+  supplier     Supplier?       @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+
+  @@index([userId, supplyId, effectiveAt])
+  @@map("supply_cost_history")
 }

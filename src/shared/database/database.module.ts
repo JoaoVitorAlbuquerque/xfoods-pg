@@ -11,6 +11,9 @@ import { SupplyCategoriesRepository } from './repositories/supply-categories.rep
 import { SuppliesRepository } from './repositories/supplies.repositories';
 import { StockMovementsRepository } from './repositories/stock-movements.repositories';
 import { StockCountsRepository } from './repositories/stock-counts.repositories';
+import { SuppliersRepository } from './repositories/suppliers.repositories';
+import { PurchasesRepository } from './repositories/purchases.repositories';
+import { SupplyCostHistoryRepository } from './repositories/supply-cost-history.repositories';
 
 @Global()
 @Module({
@@ -27,6 +30,9 @@ import { StockCountsRepository } from './repositories/stock-counts.repositories'
     SuppliesRepository,
     StockMovementsRepository,
     StockCountsRepository,
+    SuppliersRepository,
+    PurchasesRepository,
+    SupplyCostHistoryRepository,
   ],
   exports: [
     // Exportado a partir do módulo de estoque: movimentação e saldo precisam
@@ -45,6 +51,9 @@ import { StockCountsRepository } from './repositories/stock-counts.repositories'
     SuppliesRepository,
     StockMovementsRepository,
     StockCountsRepository,
+    SuppliersRepository,
+    PurchasesRepository,
+    SupplyCostHistoryRepository,
   ],
 })
 export class DatabaseModule {}

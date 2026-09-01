@@ -14,6 +14,7 @@ import {
 import { PrismaService } from 'src/shared/database/prisma.service';
 import { UnitConversionService } from 'src/modules/measurement-units/services/unit-conversion.service';
 import { StockSettingsService } from './stock-settings.service';
+import { SupplyCostingService } from './supply-costing.service';
 
 export class InsufficientStockException extends ConflictException {
   constructor(
@@ -42,6 +43,13 @@ export type RegisterMovementInput = {
   unitCode?: string;
   /** Custo por unidade INFORMADA (não por unidade base). Só usado em entradas. */
   unitCost?: Prisma.Decimal | string | number;
+  /**
+   * Custo já convertido para a unidade base. Tem precedência sobre `unitCost`.
+   * A compra passa por aqui: ela já dividiu o total da nota pela quantidade em
+   * unidade base, e recalcular a partir do preço unitário reintroduziria o
+   * arredondamento dessa divisão.
+   */
+  unitCostBase?: Prisma.Decimal | string | number;
   reason?: string;
   referenceType?: string;
   referenceId?: string;
@@ -68,6 +76,7 @@ export class StockMovementsService {
     private readonly prismaService: PrismaService,
     private readonly unitConversionService: UnitConversionService,
     private readonly stockSettingsService: StockSettingsService,
+    private readonly supplyCostingService: SupplyCostingService,
   ) {}
 
   /**
@@ -275,11 +284,15 @@ export class StockMovementsService {
     const averageCost = new Prisma.Decimal(supply.averageCost);
 
     // Custo por unidade base. Na entrada vem do que foi informado; na saída,
-    // do custo médio atual — é ele que valoriza o que sai.
-    let unitCostBase = averageCost;
+    // do custo atual do insumo — quem decide qual número é esse é o método de
+    // custeio configurado, não uma regra fixa aqui dentro.
+    let unitCostBase = this.supplyCostingService.getCurrentUnitCost(supply);
     let informedCostBase: Prisma.Decimal | null = null;
 
-    if (input.unitCost !== undefined && input.unitCost !== null) {
+    if (input.unitCostBase !== undefined && input.unitCostBase !== null) {
+      informedCostBase = this.parsePositiveQuantity(input.unitCostBase);
+      unitCostBase = informedCostBase;
+    } else if (input.unitCost !== undefined && input.unitCost !== null) {
       const unitCostInformed = this.parsePositiveQuantity(input.unitCost);
       const totalInformed = unitCostInformed.mul(quantity);
 

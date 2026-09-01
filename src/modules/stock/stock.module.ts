@@ -8,6 +8,7 @@ import { StockLevelService } from './services/stock-level.service';
 import { StockMovementsService } from './services/stock-movements.service';
 import { StockSettingsService } from './services/stock-settings.service';
 import { StockCountsService } from './services/stock-counts.service';
+import { SupplyCostingService } from './services/supply-costing.service';
 
 @Module({
   imports: [MeasurementUnitsModule],
@@ -18,10 +19,16 @@ import { StockCountsService } from './services/stock-counts.service';
     StockMovementsService,
     StockSettingsService,
     StockCountsService,
+    SupplyCostingService,
   ],
   // `StockMovementsService` é exportado porque a baixa automática da venda
   // (Fase 5) vai chamá-lo passando a transação do pagamento, e o cadastro de
   // insumo o usa para transformar saldo de abertura em movimentação.
-  exports: [StockMovementsService, StockLevelService, StockSettingsService],
+  exports: [
+    StockMovementsService,
+    StockLevelService,
+    StockSettingsService,
+    SupplyCostingService,
+  ],
 })
 export class StockModule {}

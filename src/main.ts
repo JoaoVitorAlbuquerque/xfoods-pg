@@ -1,10 +1,10 @@
 import 'dotenv/config';
 
-import { NestFactory } from '@nestjs/core';
-import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
-import * as path from 'node:path';
+import { NestFactory } from '@nestjs/core';
 import * as express from 'express';
+import * as path from 'node:path';
+import { AppModule } from './app.module';
 import { DecimalSerializerInterceptor } from './shared/interceptors/decimal-serializer.interceptor';
 
 async function bootstrap() {
@@ -22,3 +22,4 @@ async function bootstrap() {
   await app.listen(process.env.PORT ?? 3000);
 }
 bootstrap();
+// Começa novamente à partir da "Fase 4"
