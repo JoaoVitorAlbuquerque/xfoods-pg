@@ -4,9 +4,11 @@ import {
   IsArray,
   IsBoolean,
   IsEnum,
+  IsInt,
   IsNotEmpty,
   IsNumber,
   IsOptional,
+  Min,
   IsString,
   IsUUID,
   ValidateNested,
@@ -35,6 +37,7 @@ export class CreateOrderDto {
 
   @IsOptional()
   @IsArray()
+  @IsUUID('4', { each: true })
   orderIds: string[];
 
   @IsArray()
@@ -51,7 +54,8 @@ export class ProductOrderDto {
   @IsEnum(SizeType)
   size: SizeType;
 
-  @IsNumber()
+  @IsInt()
+  @Min(1)
   @IsNotEmpty()
   quantity: number;
 }

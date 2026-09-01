@@ -7,11 +7,22 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum UserRole {
+  OWNER
+  MANAGER
+  STAFF
+
+  @@map("user_role")
+}
+
 model User {
-  id       String @id @default(uuid()) @db.Uuid
-  name     String
-  email    String @unique
-  password String
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  email     String   @unique
+  password  String
+  role      UserRole @default(OWNER)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
   leads              Lead[]
   categories         Category[]
@@ -25,58 +36,74 @@ model User {
 }
 
 model Lead {
-  id      String  @id @default(uuid()) @db.Uuid
-  userId  String  @map("user_id") @db.Uuid
-  name    String
-  email   String? @unique
-  phone   String  @unique
-  address String
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  name      String
+  email     String?  @unique
+  phone     String   @unique
+  address   String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
   user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   orders Order[]
 
+  @@index([userId])
   @@map("leads")
 }
 
 model Category {
-  id     String @id @default(uuid()) @db.Uuid
-  userId String @map("user_id") @db.Uuid
-  name   String
-  icon   String
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  name      String
+  icon      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
   user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   products Product[]
 
+  @@index([userId])
   @@map("categories")
 }
 
+// Etiqueta de exibição do cardápio (nome + ícone) — NÃO é insumo de estoque.
+// O insumo com unidade, saldo e custo entra na Fase 2 como o modelo `Supply`.
 model Ingredient {
-  id     String @id @default(uuid()) @db.Uuid
-  userId String @map("user_id") @db.Uuid
-  name   String
-  icon   String
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  name      String
+  icon      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
   user     User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   products ProductIngredient[]
 
+  @@index([userId])
   @@map("ingredients")
 }
 
 model Product {
-  id          String  @id @default(uuid()) @db.Uuid
-  userId      String  @map("user_id") @db.Uuid
-  categoryId  String? @map("category_id") @db.Uuid
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  categoryId  String?  @map("category_id") @db.Uuid
   name        String
   description String
-  imagePath   String  @map("image_path")
-  price       Float
-  deleted     Boolean @default(false)
+  imagePath   String   @map("image_path")
+  price       Decimal  @db.Decimal(12, 2)
+  deleted     Boolean  @default(false)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
 
   user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   category    Category?           @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   ingredients ProductIngredient[]
   orders      ProductOrder[]
 
+  @@index([userId, deleted])
+  @@index([categoryId])
   @@map("products")
 }
 
@@ -84,6 +111,7 @@ enum OrderType {
   WAITING
   IN_PRODUCTION
   DONE
+  CANCELED
 
   @@map("order_type")
 }
@@ -95,19 +123,37 @@ model Order {
   table       Int
   status      OrderType @default(WAITING)
   createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
   description String?
   read        Boolean   @default(false)
   restarted   Boolean   @default(false)
   paid        Boolean   @default(false)
 
+  // Total congelado no momento da venda, somando os itens.
+  totalAmount Decimal @default(0) @map("total_amount") @db.Decimal(12, 2)
+
+  // Evento de venda datado — é o que delimita período em relatórios de margem.
+  paidAt     DateTime? @map("paid_at")
+  canceledAt DateTime? @map("canceled_at")
+  deletedAt  DateTime? @map("deleted_at")
+
+  // Trava de idempotência da baixa de estoque (Fase 5). A baixa só executa
+  // enquanto este campo for nulo; o estorno grava movimentos inversos e o zera.
+  stockAppliedAt DateTime? @map("stock_applied_at")
+
   user     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   lead     Lead?          @relation(fields: [leadId], references: [id], onDelete: SetNull)
   products ProductOrder[]
 
+  @@index([userId, createdAt])
+  @@index([userId, restarted])
+  @@index([userId, paidAt])
+  @@index([leadId])
   @@map("orders")
 }
 
-// Tem que rodar o comando: prisma migrate dev
+// Vínculo produto <-> etiqueta de cardápio. Sem quantidade e sem unidade
+// de propósito: a ficha técnica é o modelo `Recipe` da Fase 4.
 model ProductIngredient {
   productId    String  @map("product_id") @db.Uuid
   ingredientId String  @map("ingredient_id") @db.Uuid
@@ -133,6 +179,9 @@ enum SizeType {
 }
 
 model ProductOrder {
+  // Id próprio: sem ele não há como amarrar um movimento de estoque
+  // a um item de venda específico, nem estornar item a item (Fase 5).
+  id        String @id @default(uuid()) @db.Uuid
   userId    String @map("user_id") @db.Uuid
   productId String @map("product_id") @db.Uuid
   orderId   String @map("order_id") @db.Uuid
@@ -140,10 +189,18 @@ model ProductOrder {
   size     SizeType @default(MEAN)
   quantity Int      @default(1)
 
+  // Preço congelado na venda. Sem isto, alterar o preço de um prato
+  // reescreveria o faturamento de todos os meses anteriores.
+  unitPrice  Decimal @map("unit_price") @db.Decimal(12, 2)
+  totalPrice Decimal @map("total_price") @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id])
   order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
-  @@id([orderId, productId])
+  @@index([orderId])
+  @@index([productId])
   @@map("product_order")
 }

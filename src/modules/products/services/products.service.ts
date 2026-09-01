@@ -128,8 +128,14 @@ export class ProductsService {
   async remove(userId: string, productId: string) {
     await this.validateProductOwnershipService.validate(userId, productId);
 
-    await this.productsRepo.delete({
+    // Era `delete` físico. Um produto já vendido é referenciado por
+    // `product_order`, então o delete ou falhava por chave estrangeira ou, se
+    // um dia ganhasse cascade, apagaria o histórico de vendas junto. A rota
+    // continua existindo e respondendo 204 — o que mudou é que ela agora faz o
+    // mesmo soft delete de `PATCH /products/:productId/soft-delete`.
+    await this.productsRepo.update({
       where: { id: productId },
+      data: { deleted: true },
     });
 
     return null;

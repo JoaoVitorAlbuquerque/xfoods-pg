@@ -102,6 +102,14 @@ export class OrdersController {
     return this.ordersService.updateOrderRead(userId, orderId);
   }
 
+  @Patch(':orderId/cancel')
+  async cancel(
+    @ActiveUserId() userId: string,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+  ) {
+    return this.ordersService.cancel(userId, orderId);
+  }
+
   @Patch('paid')
   async updateOrderPaid(
     @ActiveUserId() userId: string,

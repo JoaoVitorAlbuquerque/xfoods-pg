@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
+import { UserRole } from '@prisma/client';
 import { Request } from 'express';
 import { env } from 'src/shared/config/env';
 import { IS_PUBLIC_KEY } from 'src/shared/decorators/IsPublic';
@@ -41,6 +42,11 @@ export class AuthGuard implements CanActivate {
       });
 
       request['userId'] = payload.sub;
+
+      // Tokens emitidos antes da Fase 1 não carregam `role`. Todo usuário
+      // existente virou OWNER na migração, então OWNER é o equivalente exato
+      // do que esse token já podia fazer — não é uma permissão nova.
+      request['userRole'] = payload.role ?? UserRole.OWNER;
     } catch {
       throw new UnauthorizedException();
     }
