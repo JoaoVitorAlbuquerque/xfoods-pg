@@ -12,12 +12,16 @@ import { OrdersRepository } from 'src/shared/database/repositories/orders.reposi
 import { ProductsRepository } from 'src/shared/database/repositories/products.repositories';
 import { ValidateOrderOwnershipService } from './services/validate-order-ownership.service';
 import { ValidateLeadOwnershipService } from '../leads/services/validate-lead-ownership.service';
+import { PrismaService } from 'src/shared/database/prisma.service';
+import { OrderStockService } from './services/order-stock.service';
 
 @Injectable()
 export class OrdersService {
   constructor(
+    private readonly prismaService: PrismaService,
     private readonly ordersRepo: OrdersRepository,
     private readonly productsRepo: ProductsRepository,
+    private readonly orderStockService: OrderStockService,
     private readonly validateOrderOwnershipService: ValidateOrderOwnershipService,
     private readonly validateLeadOwnershipService: ValidateLeadOwnershipService,
   ) {}
@@ -265,26 +269,71 @@ export class OrdersService {
       throw new NotFoundException('Some orders were not found for this user.');
     }
 
-    // `paid: !paid` no filtro torna a operação idempotente: chamar duas vezes
-    // atualiza zero linhas na segunda. É essa garantia que a baixa automática
-    // de estoque da Fase 5 vai usar para não debitar o estoque em dobro quando
-    // dois caixas fecharem a mesma mesa ao mesmo tempo.
-    const { count } = await this.ordersRepo.updateMany({
-      where: {
-        userId,
-        id: { in: orderIds },
-        paid: !paid,
-        deletedAt: null,
-        canceledAt: null,
-        ...(table === undefined ? {} : { table }),
-      },
-      data: {
-        paid,
-        paidAt: paid ? new Date() : null,
-      },
-    });
+    // Pagamento e baixa de estoque na MESMA transação. Se faltar insumo com
+    // `allowNegativeStock` desligado, ou se um prato não tiver ficha com
+    // `allowSaleWithoutRecipe` desligado, a transação inteira volta atrás e o
+    // pagamento não é confirmado.
+    return this.prismaService.$transaction(async (tx) => {
+      let updated = 0;
+      const alerts = [];
+      let stockMovements = 0;
 
-    return { updated: count };
+      for (const orderId of orderIds) {
+        // `paid: !paid` no filtro torna a operação idempotente: chamar duas
+        // vezes atualiza zero linhas na segunda, e a baixa não repete.
+        const { count } = await tx.order.updateMany({
+          where: {
+            id: orderId,
+            userId,
+            paid: !paid,
+            deletedAt: null,
+            canceledAt: null,
+            ...(table === undefined ? {} : { table }),
+          },
+          data: {
+            paid,
+            paidAt: paid ? new Date() : null,
+          },
+        });
+
+        if (count !== 1) {
+          continue;
+        }
+
+        updated += 1;
+
+        if (paid) {
+          const result = await this.orderStockService.applySale(
+            userId,
+            orderId,
+            tx,
+          );
+
+          stockMovements += result.movements;
+          alerts.push(...result.alerts);
+        } else {
+          // Reverter o pagamento devolve o consumo ao estoque. É o caminho de
+          // alteração de venda: estorna, ajusta, cobra de novo — nunca
+          // sobrescreve a movimentação anterior.
+          const result = await this.orderStockService.reverseSale(
+            userId,
+            orderId,
+            'Estorno por reversão de pagamento',
+            tx,
+          );
+
+          stockMovements += result.movements;
+        }
+      }
+
+      return { updated, stockMovements, alerts };
+    });
+  }
+
+  async getConsumption(userId: string, orderId: string) {
+    await this.validateOrderOwnershipService.validate(userId, orderId);
+
+    return this.orderStockService.getConsumption(userId, orderId);
   }
 
   async cancel(userId: string, orderId: string) {
@@ -298,21 +347,32 @@ export class OrdersService {
       throw new ConflictException('Order is already canceled.');
     }
 
-    // Estornar uma venda já paga significa devolver estoque e refazer o
-    // faturamento — é o `ReverseSale` da Fase 5. Até lá, o caminho é reverter
-    // o pagamento primeiro por PATCH /orders/paid com `paid: false`.
-    if (order.paid) {
-      throw new ConflictException(
-        'A paid order cannot be canceled. Revert the payment first.',
-      );
-    }
+    return this.prismaService.$transaction(async (tx) => {
+      const { count } = await tx.order.updateMany({
+        where: { id: orderId, userId, canceledAt: null, deletedAt: null },
+        data: { status: OrderType.CANCELED, canceledAt: new Date() },
+      });
 
-    return this.ordersRepo.update({
-      where: { id: orderId },
-      data: {
-        status: OrderType.CANCELED,
-        canceledAt: new Date(),
-      },
+      if (count !== 1) {
+        throw new ConflictException(
+          'Order was already canceled by another request.',
+        );
+      }
+
+      // Cancelar uma venda já concluída devolve os insumos com movimentações
+      // RETURN. O pagamento NÃO é tocado: devolver dinheiro é decisão de caixa
+      // e o sistema não modela estorno financeiro — um pedido cancelado
+      // continua marcado como pago, e a devolução se resolve fora daqui.
+      const reversal = await this.orderStockService.reverseSale(
+        userId,
+        orderId,
+        'Estorno por cancelamento do pedido',
+        tx,
+      );
+
+      const canceled = await tx.order.findUnique({ where: { id: orderId } });
+
+      return { ...canceled, stockReversal: reversal };
     });
   }
 
@@ -322,9 +382,20 @@ export class OrdersService {
     // Era `delete` físico, com `onDelete: Cascade` levando os itens junto — o
     // histórico da venda desaparecia. Com estoque, sumiria também a
     // rastreabilidade do movimento gerado por ela.
-    await this.ordersRepo.update({
-      where: { id: orderId },
-      data: { deletedAt: new Date() },
+    await this.prismaService.$transaction(async (tx) => {
+      await tx.order.updateMany({
+        where: { id: orderId, userId, deletedAt: null },
+        data: { deletedAt: new Date() },
+      });
+
+      // Um pedido excluído que já tinha baixado estoque deixaria consumo
+      // fantasma: os insumos sairiam sem venda nenhuma para explicá-los.
+      await this.orderStockService.reverseSale(
+        userId,
+        orderId,
+        'Estorno por exclusão do pedido',
+        tx,
+      );
     });
 
     return null;

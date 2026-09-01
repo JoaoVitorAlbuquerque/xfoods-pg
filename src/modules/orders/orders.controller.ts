@@ -102,6 +102,15 @@ export class OrdersController {
     return this.ordersService.updateOrderRead(userId, orderId);
   }
 
+  /** O que esta venda consumiu do estoque, o que voltou e o saldo líquido. */
+  @Get(':orderId/consumption')
+  getConsumption(
+    @ActiveUserId() userId: string,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+  ) {
+    return this.ordersService.getConsumption(userId, orderId);
+  }
+
   @Patch(':orderId/cancel')
   async cancel(
     @ActiveUserId() userId: string,

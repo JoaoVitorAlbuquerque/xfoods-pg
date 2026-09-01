@@ -55,6 +55,12 @@ export type RegisterMovementInput = {
   referenceId?: string;
   occurredAt?: Date;
   /**
+   * Movimento que este estorna. A coluna é única, então o banco recusa um
+   * segundo estorno do mesmo consumo — é a rede de proteção contra dois
+   * cancelamentos concorrentes devolverem a mesma quantidade duas vezes.
+   */
+  reversalOfId?: string;
+  /**
    * Ignora a trava de saldo negativo mesmo com `allowNegativeStock` desligado.
    * Existe para a baixa automática da venda: travar o caixa porque o sistema
    * acha que acabou a farinha é pior do que registrar o saldo negativo.
@@ -319,6 +325,7 @@ export class StockMovementsService {
         reason: input.reason,
         referenceType: input.referenceType,
         referenceId: input.referenceId,
+        reversalOfId: input.reversalOfId,
         occurredAt: input.occurredAt ?? new Date(),
       },
       include: { supply: { select: { name: true } }, unit: true },

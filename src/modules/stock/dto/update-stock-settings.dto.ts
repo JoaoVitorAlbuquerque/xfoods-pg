@@ -8,4 +8,12 @@ export class UpdateStockSettingsDto {
   @IsOptional()
   @IsBoolean()
   allowNegativeStock?: boolean;
+
+  /**
+   * Falso impede concluir a venda de um prato sem ficha ativa.
+   * Verdadeiro deixa vender, devolve alerta e não gera consumo.
+   */
+  @IsOptional()
+  @IsBoolean()
+  allowSaleWithoutRecipe?: boolean;
 }

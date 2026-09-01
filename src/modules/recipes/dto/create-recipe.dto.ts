@@ -3,6 +3,7 @@ import {
   ArrayNotEmpty,
   IsArray,
   IsBoolean,
+  IsEnum,
   IsOptional,
   IsString,
   IsUUID,
@@ -10,10 +11,31 @@ import {
   ValidateNested,
 } from 'class-validator';
 
+import { SizeType } from '@prisma/client';
+
 import {
   IsNonNegativeDecimal,
   IsPositiveDecimal,
 } from 'src/shared/validators/is-decimal-like';
+
+/**
+ * Multiplicador de consumo por tamanho vendido.
+ *
+ * A ficha descreve uma unidade do prato e o tamanho a escala. Uma pizza broto
+ * não usa a mesma massa que uma gigante — sem isto a baixa erraria em todo
+ * produto vendido em mais de um tamanho.
+ *
+ * Tamanhos disponíveis: TINY (broto), SMALL (pequena), MEAN (média),
+ * LARGE (grande), EXTRA_LARGE (gigante) e METER (metro).
+ * Tamanho sem fator cadastrado vale 1.
+ */
+export class RecipeSizeFactorDto {
+  @IsEnum(SizeType)
+  size: SizeType;
+
+  @IsPositiveDecimal()
+  factor: string | number;
+}
 
 export class RecipeItemDto {
   /** Informe `supplyId` OU `subRecipeId`, nunca os dois. */
@@ -94,4 +116,11 @@ export class CreateRecipeDto {
   @ValidateNested({ each: true })
   @Type(() => RecipeItemDto)
   items: RecipeItemDto[];
+
+  /** Informado substitui a tabela inteira de fatores. Ausente mantém a atual. */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => RecipeSizeFactorDto)
+  sizeFactors?: RecipeSizeFactorDto[];
 }

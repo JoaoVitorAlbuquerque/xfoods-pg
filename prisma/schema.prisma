@@ -432,12 +432,20 @@ model StockMovement {
 
   reason String?
 
+  /// Movimento que este estorna. `@unique` garante que um movimento só possa
+  /// ser estornado uma vez — sem isso, dois cancelamentos concorrentes
+  /// devolveriam o mesmo consumo duas vezes ao estoque.
+  reversalOfId String? @unique @map("reversal_of_id") @db.Uuid
+
   occurredAt DateTime @default(now()) @map("occurred_at")
   createdAt  DateTime @default(now()) @map("created_at")
 
   user   User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   supply Supply          @relation(fields: [supplyId], references: [id])
   unit   MeasurementUnit @relation(fields: [unitId], references: [id])
+
+  reversalOf StockMovement? @relation("MovementReversal", fields: [reversalOfId], references: [id])
+  reversedBy StockMovement? @relation("MovementReversal")
 
   countItem    StockCountItem?
   PurchaseItem PurchaseItem?
@@ -514,11 +522,18 @@ model StockSettings {
   id     String @id @default(uuid()) @db.Uuid
   userId String @unique @map("user_id") @db.Uuid
 
-  /// Falso bloqueia saída maior que o saldo. Vale para as operações manuais
-  /// deste módulo. A baixa automática da venda precisa poder passar por cima
-  /// com alerta — travar o caixa porque o sistema acha que acabou a farinha é
-  /// pior do que registrar o saldo negativo.
+  /// Falso bloqueia saída maior que o saldo, tanto nas operações manuais
+  /// quanto na baixa automática da venda. Com a trava ligada, faltar insumo
+  /// impede fechar a conta: a transação volta atrás e o pagamento não é
+  /// confirmado. É uma decisão de operação — quem ainda está ajustando o
+  /// estoque costuma preferir `true`, deixando o saldo negativo como sinal de
+  /// conferência pendente em vez de travar o caixa.
   allowNegativeStock Boolean @default(false) @map("allow_negative_stock")
+
+  /// Falso impede concluir a venda de um prato sem ficha ativa. Verdadeiro
+  /// deixa vender, avisa, e não gera consumo — o estoque desse prato passa a
+  /// não ser confiável, e é por isso que a resposta devolve o alerta.
+  allowSaleWithoutRecipe Boolean @default(true) @map("allow_sale_without_recipe")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
@@ -717,11 +732,12 @@ model Recipe {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
-  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  product     Product?         @relation(fields: [productId], references: [id], onDelete: Cascade)
-  yieldUnit   MeasurementUnit? @relation("RecipeYieldUnit", fields: [yieldUnitId], references: [id])
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product     Product?           @relation(fields: [productId], references: [id], onDelete: Cascade)
+  yieldUnit   MeasurementUnit?   @relation("RecipeYieldUnit", fields: [yieldUnitId], references: [id])
   items       RecipeItem[]
-  usedAsSubIn RecipeItem[]     @relation("RecipeSubRecipe")
+  usedAsSubIn RecipeItem[]       @relation("RecipeSubRecipe")
+  sizeFactors RecipeSizeFactor[]
 
   /// Snapshot da ficha usada em cada item de venda (preenchido na baixa).
   productOrders ProductOrder[]
@@ -771,4 +787,26 @@ model RecipeItem {
   @@index([supplyId])
   @@index([subRecipeId])
   @@map("recipe_items")
+}
+
+/// Multiplicador de consumo por tamanho.
+///
+/// A ficha descreve uma unidade do prato; o tamanho vendido escala o consumo.
+/// Uma pizza broto não usa a mesma massa que uma gigante, e sem este fator a
+/// baixa erraria sistematicamente em todo produto vendido em mais de um
+/// tamanho. Tamanho sem fator cadastrado vale 1 — a ficha vale como está.
+model RecipeSizeFactor {
+  id       String @id @default(uuid()) @db.Uuid
+  recipeId String @map("recipe_id") @db.Uuid
+
+  size   SizeType
+  factor Decimal  @db.Decimal(10, 4)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@unique([recipeId, size])
+  @@map("recipe_size_factors")
 }

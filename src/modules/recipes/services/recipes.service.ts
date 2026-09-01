@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { MeasurementUnit, Prisma } from '@prisma/client';
+import { MeasurementUnit, Prisma, SizeType } from '@prisma/client';
 
 import { PrismaService } from 'src/shared/database/prisma.service';
 import { UnitConversionService } from 'src/modules/measurement-units/services/unit-conversion.service';
@@ -17,6 +17,7 @@ import { ListRecipesDto } from '../dto/list-recipes.dto';
 const RECIPE_INCLUDE = {
   product: { select: { id: true, name: true, price: true } },
   yieldUnit: { select: { id: true, code: true, name: true, kind: true } },
+  sizeFactors: { orderBy: { size: 'asc' } },
   items: {
     orderBy: { sortOrder: 'asc' },
     include: {
@@ -49,6 +50,17 @@ const RECIPE_INCLUDE = {
 
 /** Profundidade máxima de aninhamento de sub-receitas. */
 const MAX_DEPTH = 10;
+
+/** Consumo de um insumo, já na unidade base dele. */
+export type SupplyConsumption = {
+  supplyId: string;
+  supplyName: string;
+  baseUnitCode: string;
+  quantityBase: Prisma.Decimal;
+  unitCost: Prisma.Decimal;
+  totalCost: Prisma.Decimal;
+  hasMissingCost: boolean;
+};
 
 @Injectable()
 export class RecipesService {
@@ -239,6 +251,9 @@ export class RecipesService {
           yieldUnitId: yieldUnit?.id ?? null,
           notes: dto.notes?.trim(),
           items: { create: items },
+          ...(dto.sizeFactors
+            ? { sizeFactors: { create: this.buildSizeFactors(dto.sizeFactors) } }
+            : {}),
         },
         include: RECIPE_INCLUDE,
       });
@@ -273,6 +288,10 @@ export class RecipesService {
         await tx.recipeItem.deleteMany({ where: { recipeId } });
       }
 
+      if (dto.sizeFactors !== undefined) {
+        await tx.recipeSizeFactor.deleteMany({ where: { recipeId } });
+      }
+
       await tx.recipe.update({
         where: { id: recipeId },
         data: {
@@ -285,6 +304,13 @@ export class RecipesService {
             : { yieldQuantity: new Prisma.Decimal(dto.yieldQuantity) }),
           ...(yieldUnit === null ? {} : { yieldUnitId: yieldUnit.id }),
           ...(items === null ? {} : { items: { create: items } }),
+          ...(dto.sizeFactors === undefined
+            ? {}
+            : {
+                sizeFactors: {
+                  create: this.buildSizeFactors(dto.sizeFactors),
+                },
+              }),
         },
       });
 
@@ -341,6 +367,14 @@ export class RecipesService {
           yieldUnitId: source.yieldUnitId,
           notes: dto?.notes?.trim() ?? source.notes,
           items: { create: items },
+          sizeFactors: {
+            create: (dto?.sizeFactors
+              ? this.buildSizeFactors(dto.sizeFactors)
+              : source.sizeFactors.map((entry) => ({
+                  size: entry.size,
+                  factor: entry.factor,
+                }))),
+          },
         },
         include: RECIPE_INCLUDE,
       });
@@ -496,8 +530,170 @@ export class RecipesService {
   }
 
   // -------------------------------------------------------------------------
+  // Desdobramento para consumo
+  // -------------------------------------------------------------------------
+
+  /**
+   * Achata a ficha em consumo de insumos, expandindo sub-receitas até o fim.
+   *
+   * Sub-receita não é estocada: o que sai do estoque são os insumos dela. Uma
+   * pizza que usa 100 ML de um molho que rende 4000 ML consome 1/40 dos
+   * insumos daquele molho.
+   *
+   * `client` precisa ser o client da transação quando isto roda dentro de uma —
+   * senão a leitura não enxerga o que a própria transação já escreveu.
+   */
+  async explodeToSupplies(
+    userId: string,
+    recipeId: string,
+    multiplier: Prisma.Decimal | string | number = 1,
+    client: Prisma.TransactionClient = this.prismaService,
+    visited: Set<string> = new Set(),
+    depth = 0,
+  ): Promise<SupplyConsumption[]> {
+    if (depth > MAX_DEPTH) {
+      throw new BadRequestException(
+        `Recipe nesting is deeper than ${MAX_DEPTH} levels.`,
+      );
+    }
+
+    if (visited.has(recipeId)) {
+      throw new ConflictException(
+        `Recipe ${recipeId} references itself through a sub-recipe.`,
+      );
+    }
+
+    visited.add(recipeId);
+
+    const recipe = await client.recipe.findFirst({
+      where: { id: recipeId, userId },
+      include: {
+        items: {
+          include: {
+            supply: {
+              select: {
+                id: true,
+                name: true,
+                costingMethod: true,
+                lastCost: true,
+                averageCost: true,
+                baseUnit: { select: { code: true } },
+              },
+            },
+            subRecipe: { select: { id: true, yieldQuantity: true } },
+          },
+        },
+      },
+    });
+
+    if (!recipe) {
+      throw new NotFoundException('Recipe not found.');
+    }
+
+    const factor = new Prisma.Decimal(multiplier);
+    const collected: SupplyConsumption[] = [];
+
+    for (const item of recipe.items) {
+      const effective = this.recipeCostingService
+        .effectiveQuantity(item.quantityBase, item.wastePercent)
+        .mul(factor);
+
+      if (item.supply) {
+        const unitCost = this.supplyCostingService.getCurrentUnitCost(
+          item.supply,
+        );
+
+        collected.push({
+          supplyId: item.supply.id,
+          supplyName: item.supply.name,
+          baseUnitCode: item.supply.baseUnit.code,
+          quantityBase: effective,
+          unitCost,
+          totalCost: effective.mul(unitCost),
+          hasMissingCost: unitCost.lte(0),
+        });
+
+        continue;
+      }
+
+      // A quantidade do item está na unidade de rendimento da sub-receita.
+      // Dividir pelo rendimento dá a fração de uma execução dela.
+      const fraction = effective.div(item.subRecipe.yieldQuantity);
+
+      collected.push(
+        ...(await this.explodeToSupplies(
+          userId,
+          item.subRecipe.id,
+          fraction,
+          client,
+          new Set(visited),
+          depth + 1,
+        )),
+      );
+    }
+
+    return this.aggregate(collected);
+  }
+
+  /** Fator de consumo do tamanho vendido. Tamanho sem fator cadastrado vale 1. */
+  sizeFactorFor(
+    sizeFactors: { size: SizeType; factor: Prisma.Decimal }[],
+    size: SizeType,
+  ): Prisma.Decimal {
+    const found = sizeFactors.find((entry) => entry.size === size);
+
+    return found ? new Prisma.Decimal(found.factor) : new Prisma.Decimal(1);
+  }
+
+  /** Um mesmo insumo pode chegar por caminhos diferentes; some antes de baixar. */
+  private aggregate(items: SupplyConsumption[]): SupplyConsumption[] {
+    const bySupply = new Map<string, SupplyConsumption>();
+
+    for (const item of items) {
+      const existing = bySupply.get(item.supplyId);
+
+      if (!existing) {
+        bySupply.set(item.supplyId, { ...item });
+        continue;
+      }
+
+      existing.quantityBase = existing.quantityBase.add(item.quantityBase);
+      existing.totalCost = existing.totalCost.add(item.totalCost);
+      existing.hasMissingCost = existing.hasMissingCost || item.hasMissingCost;
+    }
+
+    return [...bySupply.values()];
+  }
+
+  // -------------------------------------------------------------------------
   // Apoio
   // -------------------------------------------------------------------------
+
+  private buildSizeFactors(
+    factors: { size: SizeType; factor: string | number }[],
+  ) {
+    const seen = new Set<SizeType>();
+
+    return factors.map((entry) => {
+      if (seen.has(entry.size)) {
+        throw new BadRequestException(
+          `Size ${entry.size} appears more than once in the size factors.`,
+        );
+      }
+
+      seen.add(entry.size);
+
+      const factor = new Prisma.Decimal(entry.factor);
+
+      if (factor.lte(0)) {
+        throw new BadRequestException(
+          `Size factor for ${entry.size} must be greater than zero.`,
+        );
+      }
+
+      return { size: entry.size, factor };
+    });
+  }
 
   private async loadRecipe(userId: string, recipeId: string) {
     const recipe = await this.prismaService.recipe.findFirst({
