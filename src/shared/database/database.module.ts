@@ -6,6 +6,7 @@ import { IngredientsRepository } from './repositories/ingredients.repositories';
 import { ProductsRepository } from './repositories/products.repositories';
 import { OrdersRepository } from './repositories/orders.repositories';
 import { LeadsRepository } from './repositories/leads.repositories';
+import { MeasurementUnitsRepository } from './repositories/measurement-units.repositories';
 
 @Global()
 @Module({
@@ -17,6 +18,7 @@ import { LeadsRepository } from './repositories/leads.repositories';
     ProductsRepository,
     OrdersRepository,
     LeadsRepository,
+    MeasurementUnitsRepository,
   ],
   exports: [
     UsersRepository,
@@ -25,6 +27,7 @@ import { LeadsRepository } from './repositories/leads.repositories';
     ProductsRepository,
     OrdersRepository,
     LeadsRepository,
+    MeasurementUnitsRepository,
   ],
 })
 export class DatabaseModule {}

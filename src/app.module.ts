@@ -11,6 +11,7 @@ import { IngredientsModule } from './modules/ingredients/ingredients.module';
 import { ProductsModule } from './modules/products/products.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { LeadsModule } from './modules/leads/leads.module';
+import { MeasurementUnitsModule } from './modules/measurement-units/measurement-units.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { LeadsModule } from './modules/leads/leads.module';
     ProductsModule,
     OrdersModule,
     LeadsModule,
+    MeasurementUnitsModule,
   ],
   controllers: [],
   providers: [

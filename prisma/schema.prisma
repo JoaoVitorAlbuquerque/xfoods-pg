@@ -31,8 +31,60 @@ model User {
   orders             Order[]
   productIngredients ProductIngredient[]
   productOrders      ProductOrder[]
+  measurementUnits   MeasurementUnit[]
 
   @@map("users")
+}
+
+enum UnitKind {
+  WEIGHT
+  VOLUME
+  COUNT
+
+  @@map("unit_kind")
+}
+
+/// Unidade de medida usada em compra, estoque e consumo.
+///
+/// Cada grandeza tem uma base canônica em que todo cálculo interno acontece:
+/// G para massa, ML para volume, UN para contagem. `factorToBase` diz quantas
+/// unidades base cabem em 1 desta unidade — 1 KG = 1000 G, 1 L = 1000 ML.
+///
+/// Contagem nunca converte para massa ou volume: 1 KG não é 1 UN. É o `kind`
+/// que garante isso, e a conversão entre grandezas diferentes é recusada.
+model MeasurementUnit {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// Nulo nas unidades de sistema, que são compartilhadas por todos os
+  /// estabelecimentos. KG, G, L e ML são constantes físicas: duplicá-las por
+  /// tenant abriria espaço para alguém salvar "1 KG = 500 G" e corromper o
+  /// custo de todas as fichas técnicas em silêncio.
+  userId String? @map("user_id") @db.Uuid
+
+  code String
+  name String
+  kind UnitKind
+
+  /// Nulo em unidades de embalagem (CX, PCT, FARDO): não existe fator
+  /// universal, porque uma caixa de tomate não pesa o mesmo que uma de azeite.
+  /// Esse fator passa a ser definido por insumo no módulo de compras.
+  factorToBase Decimal? @map("factor_to_base") @db.Decimal(20, 8)
+
+  /// Marca a unidade canônica da grandeza (G, ML, UN).
+  isBase      Boolean @default(false) @map("is_base")
+  isPackaging Boolean @default(false) @map("is_packaging")
+  isSystem    Boolean @default(false) @map("is_system")
+  active      Boolean @default(true)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, code])
+  @@index([userId])
+  @@index([kind])
+  @@map("measurement_units")
 }
 
 model Lead {
