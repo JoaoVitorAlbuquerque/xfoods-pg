@@ -12,6 +12,8 @@ import { ProductsModule } from './modules/products/products.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { LeadsModule } from './modules/leads/leads.module';
 import { MeasurementUnitsModule } from './modules/measurement-units/measurement-units.module';
+import { SuppliesModule } from './modules/supplies/supplies.module';
+import { StockModule } from './modules/stock/stock.module';
 
 @Module({
   imports: [
@@ -24,6 +26,8 @@ import { MeasurementUnitsModule } from './modules/measurement-units/measurement-
     OrdersModule,
     LeadsModule,
     MeasurementUnitsModule,
+    SuppliesModule,
+    StockModule,
   ],
   controllers: [],
   providers: [

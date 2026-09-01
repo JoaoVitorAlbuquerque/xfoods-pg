@@ -32,6 +32,11 @@ model User {
   productIngredients ProductIngredient[]
   productOrders      ProductOrder[]
   measurementUnits   MeasurementUnit[]
+  supplyCategories   SupplyCategory[]
+  supplies           Supply[]
+  stockMovements     StockMovement[]
+  stockCounts        StockCount[]
+  stockSettings      StockSettings?
 
   @@map("users")
 }
@@ -80,6 +85,10 @@ model MeasurementUnit {
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
   user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  suppliesAsBaseUnit Supply[]
+  stockMovements     StockMovement[]
+  stockCountItems    StockCountItem[]
 
   @@unique([userId, code])
   @@index([userId])
@@ -255,4 +264,215 @@ model ProductOrder {
   @@index([orderId])
   @@index([productId])
   @@map("product_order")
+}
+
+// ===========================================================================
+// Insumos e estoque
+// ===========================================================================
+
+model SupplyCategory {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+
+  name   String
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  supplies Supply[]
+
+  @@unique([userId, name])
+  @@index([userId])
+  @@map("supply_categories")
+}
+
+/// Insumo: tudo que é consumido para produzir — carne, queijo, tempero,
+/// espeto de madeira, embalagem.
+///
+/// `currentStock` é cache denormalizado: o saldo verdadeiro é a soma de
+/// `quantityBase` em `StockMovement`. Os dois só são escritos juntos, na mesma
+/// transação, e o teste de reconciliação confere que não divergiram.
+model Supply {
+  id               String  @id @default(uuid()) @db.Uuid
+  userId           String  @map("user_id") @db.Uuid
+  supplyCategoryId String? @map("supply_category_id") @db.Uuid
+
+  /// Unidade em que o saldo deste insumo é guardado. Toda quantidade informada
+  /// em outra unidade é convertida para cá antes de virar movimentação.
+  /// Não pode ser unidade de embalagem: sem fator, não há como converter.
+  baseUnitId String @map("base_unit_id") @db.Uuid
+
+  name        String
+  description String?
+
+  currentStock Decimal  @default(0) @map("current_stock") @db.Decimal(18, 6)
+  minStock     Decimal  @default(0) @map("min_stock") @db.Decimal(18, 6)
+  maxStock     Decimal? @map("max_stock") @db.Decimal(18, 6)
+
+  /// Custo médio ponderado por unidade base, recalculado a cada entrada com
+  /// custo informado. É o que valoriza as saídas. O histórico de custo e a
+  /// entrada por nota de compra entram no módulo de compras.
+  averageCost Decimal  @default(0) @map("average_cost") @db.Decimal(14, 6)
+  lastCost    Decimal? @map("last_cost") @db.Decimal(14, 6)
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category   SupplyCategory?  @relation(fields: [supplyCategoryId], references: [id], onDelete: SetNull)
+  baseUnit   MeasurementUnit  @relation(fields: [baseUnitId], references: [id])
+  movements  StockMovement[]
+  countItems StockCountItem[]
+
+  @@unique([userId, name])
+  @@index([userId, active])
+  @@index([supplyCategoryId])
+  @@map("supplies")
+}
+
+enum StockMovementType {
+  PURCHASE
+  SALE
+  LOSS
+  ADJUSTMENT
+  PRODUCTION
+  RETURN
+  TRANSFER
+
+  @@map("stock_movement_type")
+}
+
+/// Livro-razão do estoque. Append-only: nada aqui é atualizado nem apagado, e
+/// estorno vira movimento compensatório. É o que torna auditável a pergunta
+/// "por que o saldo é esse".
+///
+/// CONVENÇÃO DE SINAL: negativo é saída. Vale para `quantity`, `quantityBase`
+/// e `totalCost` ao mesmo tempo — um único campo carregando o sentido evita
+/// que duas fontes de verdade divirjam. Saldo = SUM(quantity_base).
+model StockMovement {
+  id       String @id @default(uuid()) @db.Uuid
+  userId   String @map("user_id") @db.Uuid
+  supplyId String @map("supply_id") @db.Uuid
+
+  /// Unidade em que a quantidade foi informada, preservada para auditoria:
+  /// "entrei 10 KG" continua legível mesmo com o saldo guardado em gramas.
+  unitId String @map("unit_id") @db.Uuid
+
+  type StockMovementType
+
+  quantity     Decimal @db.Decimal(18, 6)
+  quantityBase Decimal @map("quantity_base") @db.Decimal(18, 6)
+
+  /// Custo por unidade base, sempre positivo. `totalCost` acompanha o sinal da
+  /// quantidade, então SUM(total_cost) é o valor do estoque.
+  unitCost  Decimal @default(0) @map("unit_cost") @db.Decimal(14, 6)
+  totalCost Decimal @default(0) @map("total_cost") @db.Decimal(14, 4)
+
+  /// Saldo do insumo depois deste movimento, para reconstruir o extrato sem
+  /// somar a tabela inteira a cada linha.
+  balanceAfter Decimal @map("balance_after") @db.Decimal(18, 6)
+
+  /// Origem do movimento: STOCK_COUNT, ORDER, PURCHASE... com o id do documento.
+  referenceType String? @map("reference_type")
+  referenceId   String? @map("reference_id") @db.Uuid
+
+  reason String?
+
+  occurredAt DateTime @default(now()) @map("occurred_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user   User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  supply Supply          @relation(fields: [supplyId], references: [id])
+  unit   MeasurementUnit @relation(fields: [unitId], references: [id])
+
+  countItem StockCountItem?
+
+  @@index([userId, supplyId, occurredAt])
+  @@index([userId, type])
+  @@index([referenceType, referenceId])
+  @@map("stock_movements")
+}
+
+enum StockCountStatus {
+  OPEN
+  APPLIED
+  CANCELED
+
+  @@map("stock_count_status")
+}
+
+/// Contagem física. Enquanto está OPEN nada afeta o estoque; ao aplicar, cada
+/// item com diferença gera um movimento de ADJUSTMENT.
+model StockCount {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+
+  status StockCountStatus @default(OPEN)
+  note   String?
+
+  countedAt  DateTime  @default(now()) @map("counted_at")
+  appliedAt  DateTime? @map("applied_at")
+  canceledAt DateTime? @map("canceled_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user  User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items StockCountItem[]
+
+  @@index([userId, status])
+  @@map("stock_counts")
+}
+
+model StockCountItem {
+  id           String @id @default(uuid()) @db.Uuid
+  stockCountId String @map("stock_count_id") @db.Uuid
+  supplyId     String @map("supply_id") @db.Uuid
+  unitId       String @map("unit_id") @db.Uuid
+
+  countedQuantity     Decimal @map("counted_quantity") @db.Decimal(18, 6)
+  countedQuantityBase Decimal @map("counted_quantity_base") @db.Decimal(18, 6)
+
+  /// Preenchidos no momento da aplicação, não na digitação: o saldo do sistema
+  /// pode mudar entre contar e aplicar, e o que vale é o do instante do ajuste.
+  systemQuantityBase Decimal? @map("system_quantity_base") @db.Decimal(18, 6)
+  differenceBase     Decimal? @map("difference_base") @db.Decimal(18, 6)
+
+  movementId String? @unique @map("movement_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  stockCount StockCount      @relation(fields: [stockCountId], references: [id], onDelete: Cascade)
+  supply     Supply          @relation(fields: [supplyId], references: [id])
+  unit       MeasurementUnit @relation(fields: [unitId], references: [id])
+  movement   StockMovement?  @relation(fields: [movementId], references: [id])
+
+  @@unique([stockCountId, supplyId])
+  @@index([supplyId])
+  @@map("stock_count_items")
+}
+
+/// Configuração de estoque do estabelecimento. Tabela própria porque vai
+/// crescer (método de custeio, política de alerta) e porque um registro
+/// ausente precisa significar "padrões", não "usuário sem configuração".
+model StockSettings {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @unique @map("user_id") @db.Uuid
+
+  /// Falso bloqueia saída maior que o saldo. Vale para as operações manuais
+  /// deste módulo. A baixa automática da venda precisa poder passar por cima
+  /// com alerta — travar o caixa porque o sistema acha que acabou a farinha é
+  /// pior do que registrar o saldo negativo.
+  allowNegativeStock Boolean @default(false) @map("allow_negative_stock")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("stock_settings")
 }
