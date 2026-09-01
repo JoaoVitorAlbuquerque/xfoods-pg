@@ -22,4 +22,3 @@ async function bootstrap() {
   await app.listen(process.env.PORT ?? 3000);
 }
 bootstrap();
-// Começa novamente à partir da "Fase 4"

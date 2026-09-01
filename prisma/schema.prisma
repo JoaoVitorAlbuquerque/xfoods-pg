@@ -40,6 +40,7 @@ model User {
   suppliers          Supplier[]
   purchases          Purchase[]
   supplyCostHistory  SupplyCostHistory[]
+  recipes            Recipe[]
 
   @@map("users")
 }
@@ -95,6 +96,8 @@ model MeasurementUnit {
   purchaseItems          PurchaseItem[]
   costHistoryEntries     SupplyCostHistory[]
   suppliesAsLastPurchase Supply[]            @relation("SupplyLastPurchaseUnit")
+  recipeYields           Recipe[]            @relation("RecipeYieldUnit")
+  recipeItems            RecipeItem[]        @relation("RecipeItemUnit")
 
   @@unique([userId, code])
   @@index([userId])
@@ -168,6 +171,7 @@ model Product {
   category    Category?           @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   ingredients ProductIngredient[]
   orders      ProductOrder[]
+  recipes     Recipe[]
 
   @@index([userId, deleted])
   @@index([categoryId])
@@ -261,11 +265,23 @@ model ProductOrder {
   unitPrice  Decimal @map("unit_price") @db.Decimal(12, 2)
   totalPrice Decimal @map("total_price") @db.Decimal(12, 2)
 
+  /// Snapshot da ficha técnica usada nesta venda. Preenchido pela baixa
+  /// automática (Fase 5) e nulo até lá.
+  ///
+  /// Guardar a versão e o custo congelados é o que torna a margem histórica
+  /// verdadeira: editar a ficha ou o preço de um insumo depois não pode mudar
+  /// o que aquele prato custou no dia em que foi vendido — foi o mesmo motivo
+  /// de `unitPrice` existir aqui.
+  recipeId        String?  @map("recipe_id") @db.Uuid
+  recipeUnitCost  Decimal? @map("recipe_unit_cost") @db.Decimal(14, 6)
+  recipeTotalCost Decimal? @map("recipe_total_cost") @db.Decimal(14, 4)
+
   createdAt DateTime @default(now()) @map("created_at")
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id])
   order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  recipe  Recipe? @relation(fields: [recipeId], references: [id])
 
   @@index([orderId])
   @@index([productId])
@@ -340,11 +356,12 @@ model Supply {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
-  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  category   SupplyCategory?  @relation(fields: [supplyCategoryId], references: [id], onDelete: SetNull)
-  baseUnit   MeasurementUnit  @relation(fields: [baseUnitId], references: [id])
-  movements  StockMovement[]
-  countItems StockCountItem[]
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category    SupplyCategory?  @relation(fields: [supplyCategoryId], references: [id], onDelete: SetNull)
+  baseUnit    MeasurementUnit  @relation(fields: [baseUnitId], references: [id])
+  movements   StockMovement[]
+  countItems  StockCountItem[]
+  recipeItems RecipeItem[]
 
   lastSupplier     Supplier?           @relation("SupplyLastSupplier", fields: [lastSupplierId], references: [id], onDelete: SetNull)
   lastPurchaseUnit MeasurementUnit?    @relation("SupplyLastPurchaseUnit", fields: [lastPurchaseUnitId], references: [id])
@@ -662,4 +679,96 @@ model SupplyCostHistory {
 
   @@index([userId, supplyId, effectiveAt])
   @@map("supply_cost_history")
+}
+
+// ===========================================================================
+// Fichas técnicas
+// ===========================================================================
+
+/// Ficha técnica versionada.
+///
+/// Reaproveita `Product` como o prato — não existe entidade paralela para
+/// representar prato. Um produto pode ter várias versões de ficha, e só uma
+/// fica ativa para novas vendas. Versão antiga nunca é apagada: é ela que
+/// explica o custo das vendas feitas enquanto valia.
+///
+/// `productId` nulo marca uma SUB-RECEITA (molho, massa base, pré-preparo),
+/// que existe para ser usada dentro de outras fichas. Nesta fase a sub-receita
+/// só compõe custo; transformá-la em estoque próprio depende de ordem de
+/// produção, que ainda não existe.
+model Recipe {
+  id        String  @id @default(uuid()) @db.Uuid
+  userId    String  @map("user_id") @db.Uuid
+  productId String? @map("product_id") @db.Uuid
+
+  /// Obrigatório quando `productId` é nulo — é o nome da sub-receita.
+  name String?
+
+  version Int
+  active  Boolean @default(false)
+
+  /// Quanto uma execução desta ficha rende. Para prato costuma ser 1 porção;
+  /// para sub-receita é o volume produzido (2000 ML de molho, por exemplo).
+  yieldQuantity Decimal @default(1) @map("yield_quantity") @db.Decimal(18, 6)
+  yieldUnitId   String? @map("yield_unit_id") @db.Uuid
+
+  notes String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product     Product?         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  yieldUnit   MeasurementUnit? @relation("RecipeYieldUnit", fields: [yieldUnitId], references: [id])
+  items       RecipeItem[]
+  usedAsSubIn RecipeItem[]     @relation("RecipeSubRecipe")
+
+  /// Snapshot da ficha usada em cada item de venda (preenchido na baixa).
+  productOrders ProductOrder[]
+
+  @@unique([userId, productId, version])
+  @@index([userId, productId])
+  @@index([userId, active])
+  @@map("recipes")
+}
+
+/// Linha da ficha: um insumo OU uma sub-receita, nunca os dois.
+model RecipeItem {
+  id       String @id @default(uuid()) @db.Uuid
+  recipeId String @map("recipe_id") @db.Uuid
+
+  supplyId    String? @map("supply_id") @db.Uuid
+  subRecipeId String? @map("sub_recipe_id") @db.Uuid
+
+  /// Unidade em que a quantidade foi escrita na ficha. Para item de insumo,
+  /// precisa ser da mesma grandeza da unidade base dele; para sub-receita, da
+  /// mesma grandeza do rendimento dela.
+  unitId String @map("unit_id") @db.Uuid
+
+  quantity Decimal @db.Decimal(18, 6)
+
+  /// Quantidade líquida convertida: para insumo, na unidade base dele; para
+  /// sub-receita, na unidade de rendimento dela.
+  quantityBase Decimal @map("quantity_base") @db.Decimal(18, 6)
+
+  /// Perda de preparo, em porcento. Segue a convenção de ficha técnica:
+  /// é quanto se perde do que entra, então a quantidade bruta necessária é
+  /// `líquida / (1 - perda)`. Para 200 g líquidos com 10% de perda, é preciso
+  /// partir de 222,22 g — e não de 220 g.
+  wastePercent Decimal @default(0) @map("waste_percent") @db.Decimal(7, 4)
+
+  notes     String?
+  sortOrder Int     @default(0) @map("sort_order")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  recipe    Recipe          @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  supply    Supply?         @relation(fields: [supplyId], references: [id])
+  subRecipe Recipe?         @relation("RecipeSubRecipe", fields: [subRecipeId], references: [id])
+  unit      MeasurementUnit @relation("RecipeItemUnit", fields: [unitId], references: [id])
+
+  @@index([recipeId])
+  @@index([supplyId])
+  @@index([subRecipeId])
+  @@map("recipe_items")
 }
