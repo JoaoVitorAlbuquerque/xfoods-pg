@@ -41,6 +41,9 @@ model User {
   purchases          Purchase[]
   supplyCostHistory  SupplyCostHistory[]
   recipes            Recipe[]
+  expenseCategories  ExpenseCategory[]
+  expenses           Expense[]
+  costAllocation     CostAllocationSettings?
 
   @@map("users")
 }
@@ -815,4 +818,167 @@ model RecipeSizeFactor {
 
   @@unique([recipeId, size])
   @@map("recipe_size_factors")
+}
+
+// ===========================================================================
+// Despesas operacionais e rateio de custo indireto
+// ===========================================================================
+
+enum ExpenseType {
+  /// Não varia com o volume vendido: aluguel, contador, internet.
+  FIXED
+  /// Acompanha o movimento: comissão, taxa de cartão, embalagem de entrega.
+  VARIABLE
+
+  @@map("expense_type")
+}
+
+/// Com que frequência a despesa se repete na competência.
+enum ExpenseRecurrence {
+  ONCE
+  DAILY
+  WEEKLY
+  MONTHLY
+  YEARLY
+
+  @@map("expense_recurrence")
+}
+
+/// Direto é o que a ficha técnica já mede (insumo consumido pelo prato);
+/// indireto é o que precisa ser rateado. Só indireto entra no rateio — somar
+/// um custo direto aqui o contaria duas vezes no custo completo.
+enum CostNature {
+  DIRECT
+  INDIRECT
+
+  @@map("cost_nature")
+}
+
+enum AllocationMethod {
+  /// Total de despesas ÷ unidades vendidas. Único implementado nesta versão.
+  PER_SOLD_UNIT
+  BY_REVENUE
+  MANUAL
+
+  @@map("allocation_method")
+}
+
+/// Período de referência da estimativa de vendas.
+enum AllocationPeriod {
+  DAILY
+  WEEKLY
+  MONTHLY
+  YEARLY
+
+  @@map("allocation_period")
+}
+
+model ExpenseCategory {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+
+  name String
+
+  /// Prepara a separação entre custo direto e indireto. Despesa operacional
+  /// nasce INDIRECT; a categoria é onde isso passa a ser configurável quando
+  /// houver custo direto que não venha de ficha técnica.
+  nature CostNature @default(INDIRECT)
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expenses Expense[]
+
+  @@unique([userId, name])
+  @@index([userId])
+  @@map("expense_categories")
+}
+
+/// Despesa do estabelecimento, descrita como REGRA e não como lançamento.
+///
+/// Um aluguel mensal é uma linha só: valor, início e periodicidade. As
+/// ocorrências de cada mês são derivadas da regra na hora do relatório, o que
+/// mantém a competência correta sem depender de alguém lançar todo mês.
+///
+/// Mudança de valor não edita a linha: encerra esta com `endDate` e cria outra.
+/// Editar o valor reescreveria o custo de todos os meses anteriores — o mesmo
+/// motivo de `unitPrice` existir congelado no item de venda.
+model Expense {
+  id                String  @id @default(uuid()) @db.Uuid
+  userId            String  @map("user_id") @db.Uuid
+  expenseCategoryId String? @map("expense_category_id") @db.Uuid
+
+  description String
+  type        ExpenseType       @default(FIXED)
+  recurrence  ExpenseRecurrence @default(MONTHLY)
+
+  amount Decimal @db.Decimal(14, 2)
+
+  /// Competência, não data de cadastro: é a partir daqui que a despesa passa a
+  /// pesar no custo, mesmo que tenha sido cadastrada meses depois. Guardadas
+  /// como data pura para a competência não escorregar por fuso horário.
+  startDate DateTime  @map("start_date") @db.Date
+  endDate   DateTime? @map("end_date") @db.Date
+
+  active Boolean @default(true)
+
+  /// Quando a despesa deixou de valer, se ela foi desligada sem `endDate`.
+  /// Sem este carimbo, desativar o aluguel hoje zeraria o custo de janeiro —
+  /// desativar é parar de repetir daqui pra frente, não apagar o passado.
+  deactivatedAt DateTime? @map("deactivated_at")
+
+  /// Permite tirar uma despesa específica do rateio sem desativá-la nem mudar
+  /// a categoria dela — investimento pontual, obra, compra de equipamento.
+  includeInAllocation Boolean @default(true) @map("include_in_allocation")
+
+  notes String?
+
+  /// Exclusão lógica: relatórios de competência antiga continuam reproduzíveis.
+  deletedAt DateTime? @map("deleted_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category ExpenseCategory? @relation(fields: [expenseCategoryId], references: [id], onDelete: SetNull)
+
+  @@index([userId, active])
+  @@index([userId, startDate])
+  @@index([expenseCategoryId])
+  @@map("expenses")
+}
+
+/// Como o custo indireto vira custo por unidade vendida.
+model CostAllocationSettings {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @unique @map("user_id") @db.Uuid
+
+  method AllocationMethod @default(PER_SOLD_UNIT)
+
+  /// A que período a estimativa se refere. Um relatório de três meses com
+  /// referência MENSAL multiplica a estimativa por três, para que o custo por
+  /// unidade não mude só porque a janela ficou maior.
+  referencePeriod AllocationPeriod @default(MONTHLY) @map("reference_period")
+
+  /// Unidades que se espera vender no período de referência. É o divisor do
+  /// PER_SOLD_UNIT.
+  estimatedSalesUnits Decimal @default(0) @map("estimated_sales_units") @db.Decimal(18, 6)
+
+  /// Receita esperada no período de referência. Sem uso enquanto BY_REVENUE
+  /// não estiver habilitado; fica aqui para o método nascer com dado.
+  estimatedRevenue Decimal @default(0) @map("estimated_revenue") @db.Decimal(14, 2)
+
+  /// Quais despesas entram no rateio, por tipo.
+  includeFixed    Boolean @default(true) @map("include_fixed")
+  includeVariable Boolean @default(true) @map("include_variable")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("cost_allocation_settings")
 }
