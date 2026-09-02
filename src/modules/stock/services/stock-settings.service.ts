@@ -17,6 +17,9 @@ const DEFAULTS = {
   // Padrão permissivo: um cardápio sem fichas ainda precisa poder vender.
   // Quem já mapeou as fichas desliga isto e passa a exigir ficha para fechar.
   allowSaleWithoutRecipe: true,
+  // 5% é o ponto de partida do relatório Estimado x Real: abaixo disso o
+  // desvio costuma ser porção servida a olho, não perda que valha apurar.
+  stockConsumptionTolerancePercentage: 5,
 };
 
 @Injectable()
@@ -37,8 +40,30 @@ export class StockSettingsService {
         settings?.allowNegativeStock ?? DEFAULTS.allowNegativeStock,
       allowSaleWithoutRecipe:
         settings?.allowSaleWithoutRecipe ?? DEFAULTS.allowSaleWithoutRecipe,
+      stockConsumptionTolerancePercentage: new Prisma.Decimal(
+        settings?.stockConsumptionTolerancePercentage ??
+          DEFAULTS.stockConsumptionTolerancePercentage,
+      ),
       updatedAt: settings?.updatedAt ?? null,
     };
+  }
+
+  /** Margem aceitável de desvio entre consumo estimado e real, em porcento. */
+  async consumptionTolerance(
+    userId: string,
+    tx?: Prisma.TransactionClient,
+  ): Promise<Prisma.Decimal> {
+    const client = tx ?? this.prismaService;
+
+    const settings = await client.stockSettings.findUnique({
+      where: { userId },
+      select: { stockConsumptionTolerancePercentage: true },
+    });
+
+    return new Prisma.Decimal(
+      settings?.stockConsumptionTolerancePercentage ??
+        DEFAULTS.stockConsumptionTolerancePercentage,
+    );
   }
 
   async allowsNegativeStock(
@@ -64,6 +89,10 @@ export class StockSettingsService {
           dto.allowNegativeStock ?? DEFAULTS.allowNegativeStock,
         allowSaleWithoutRecipe:
           dto.allowSaleWithoutRecipe ?? DEFAULTS.allowSaleWithoutRecipe,
+        stockConsumptionTolerancePercentage: new Prisma.Decimal(
+          dto.stockConsumptionTolerancePercentage ??
+            DEFAULTS.stockConsumptionTolerancePercentage,
+        ),
       },
       update: {
         ...(dto.allowNegativeStock === undefined
@@ -72,12 +101,21 @@ export class StockSettingsService {
         ...(dto.allowSaleWithoutRecipe === undefined
           ? {}
           : { allowSaleWithoutRecipe: dto.allowSaleWithoutRecipe }),
+        ...(dto.stockConsumptionTolerancePercentage === undefined
+          ? {}
+          : {
+              stockConsumptionTolerancePercentage: new Prisma.Decimal(
+                dto.stockConsumptionTolerancePercentage,
+              ),
+            }),
       },
     });
 
     return {
       allowNegativeStock: settings.allowNegativeStock,
       allowSaleWithoutRecipe: settings.allowSaleWithoutRecipe,
+      stockConsumptionTolerancePercentage:
+        settings.stockConsumptionTolerancePercentage,
       updatedAt: settings.updatedAt,
     };
   }

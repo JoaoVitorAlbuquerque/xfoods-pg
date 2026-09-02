@@ -1,5 +1,7 @@
 import { IsBoolean, IsOptional } from 'class-validator';
 
+import { IsNonNegativeDecimal } from 'src/shared/validators/is-decimal-like';
+
 export class UpdateStockSettingsDto {
   /**
    * Falso bloqueia saída maior que o saldo nas operações manuais.
@@ -16,4 +18,13 @@ export class UpdateStockSettingsDto {
   @IsOptional()
   @IsBoolean()
   allowSaleWithoutRecipe?: boolean;
+
+  /**
+   * Desvio aceitável entre o consumo previsto pelas fichas e o consumo real,
+   * em porcento. Zero passa a acusar qualquer diferença — inclusive as de
+   * arredondamento —, então o padrão é 5.
+   */
+  @IsOptional()
+  @IsNonNegativeDecimal()
+  stockConsumptionTolerancePercentage?: string | number;
 }
