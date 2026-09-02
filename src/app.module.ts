@@ -18,6 +18,7 @@ import { PurchasesModule } from './modules/purchases/purchases.module';
 import { RecipesModule } from './modules/recipes/recipes.module';
 import { ConsumptionModule } from './modules/consumption/consumption.module';
 import { ExpensesModule } from './modules/expenses/expenses.module';
+import { PricingModule } from './modules/pricing/pricing.module';
 
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { ExpensesModule } from './modules/expenses/expenses.module';
     RecipesModule,
     ConsumptionModule,
     ExpensesModule,
+    PricingModule,
   ],
   controllers: [],
   providers: [
