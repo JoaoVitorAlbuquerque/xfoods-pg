@@ -29,6 +29,9 @@ import { SupplyCostingService } from './services/supply-costing.service';
     StockLevelService,
     StockSettingsService,
     SupplyCostingService,
+    // Exportado para o painel gerencial, que mostra a posição de estoque junto
+    // dos demais indicadores em vez de reimplementar a classificação de nível.
+    StockService,
   ],
 })
 export class StockModule {}

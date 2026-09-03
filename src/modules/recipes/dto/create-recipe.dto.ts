@@ -97,6 +97,20 @@ export class CreateRecipeDto {
   @IsString()
   yieldUnit?: string;
 
+  /**
+   * Insumo onde o subproduto desta sub-receita é estocado.
+   *
+   * Informar transforma a sub-receita em item PRODUZIDO: ela passa a ter saldo
+   * próprio, e as fichas que a usam consomem esse saldo em vez de desdobrar
+   * até tomate e cebola. Quem repõe o saldo é a ordem de produção.
+   *
+   * Só vale para sub-receita, e a unidade base do insumo precisa ser da mesma
+   * grandeza do rendimento.
+   */
+  @IsOptional()
+  @IsUUID()
+  outputSupplyId?: string;
+
   @IsOptional()
   @IsString()
   @MaxLength(1000)

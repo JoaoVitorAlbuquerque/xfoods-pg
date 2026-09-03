@@ -17,6 +17,17 @@ import { ListRecipesDto } from '../dto/list-recipes.dto';
 const RECIPE_INCLUDE = {
   product: { select: { id: true, name: true, price: true } },
   yieldUnit: { select: { id: true, code: true, name: true, kind: true } },
+  outputSupply: {
+    select: {
+      id: true,
+      name: true,
+      currentStock: true,
+      costingMethod: true,
+      lastCost: true,
+      averageCost: true,
+      baseUnit: { select: { id: true, code: true, name: true, kind: true } },
+    },
+  },
   sizeFactors: { orderBy: { size: 'asc' } },
   items: {
     orderBy: { sortOrder: 'asc' },
@@ -39,8 +50,36 @@ const RECIPE_INCLUDE = {
           productId: true,
           version: true,
           yieldQuantity: true,
+          outputSupplyId: true,
+          // `factorToBase` entra porque o custo do subproduto estocado é
+          // convertido entre a unidade de rendimento e a unidade base do
+          // insumo de saída.
           yieldUnit: {
-            select: { id: true, code: true, name: true, kind: true },
+            select: {
+              id: true,
+              code: true,
+              name: true,
+              kind: true,
+              factorToBase: true,
+            },
+          },
+          outputSupply: {
+            select: {
+              id: true,
+              name: true,
+              costingMethod: true,
+              lastCost: true,
+              averageCost: true,
+              baseUnit: {
+                select: {
+                  id: true,
+                  code: true,
+                  name: true,
+                  kind: true,
+                  factorToBase: true,
+                },
+              },
+            },
           },
         },
       },
@@ -217,6 +256,15 @@ export class RecipesService {
 
     const yieldUnit = await this.resolveYieldUnit(userId, dto, isSubRecipe);
 
+    if (dto.outputSupplyId) {
+      await this.resolveOutputSupply(
+        userId,
+        dto.outputSupplyId,
+        isSubRecipe,
+        yieldUnit,
+      );
+    }
+
     const items = await this.buildItems(userId, dto.items, {
       productId: dto.productId ?? null,
       recipeId: null,
@@ -249,6 +297,7 @@ export class RecipesService {
           active: shouldActivate,
           yieldQuantity: new Prisma.Decimal(dto.yieldQuantity ?? 1),
           yieldUnitId: yieldUnit?.id ?? null,
+          outputSupplyId: dto.outputSupplyId ?? null,
           notes: dto.notes?.trim(),
           items: { create: items },
           ...(dto.sizeFactors
@@ -272,6 +321,15 @@ export class RecipesService {
             { yieldUnit: dto.yieldUnit },
             isSubRecipe,
           );
+
+    if (dto.outputSupplyId) {
+      await this.resolveOutputSupply(
+        userId,
+        dto.outputSupplyId,
+        isSubRecipe,
+        yieldUnit ?? (current.yieldUnit as MeasurementUnit | null),
+      );
+    }
 
     const items =
       dto.items === undefined
@@ -303,6 +361,9 @@ export class RecipesService {
             ? {}
             : { yieldQuantity: new Prisma.Decimal(dto.yieldQuantity) }),
           ...(yieldUnit === null ? {} : { yieldUnitId: yieldUnit.id }),
+          ...(dto.outputSupplyId === undefined
+            ? {}
+            : { outputSupplyId: dto.outputSupplyId }),
           ...(items === null ? {} : { items: { create: items } }),
           ...(dto.sizeFactors === undefined
             ? {}
@@ -365,6 +426,9 @@ export class RecipesService {
               ? source.yieldQuantity
               : new Prisma.Decimal(dto.yieldQuantity),
           yieldUnitId: source.yieldUnitId,
+          // A versão nova produz o mesmo subproduto: trocar a receita do molho
+          // não cria um molho diferente na geladeira.
+          outputSupplyId: dto?.outputSupplyId ?? source.outputSupplyId,
           notes: dto?.notes?.trim() ?? source.notes,
           items: { create: items },
           sizeFactors: {
@@ -463,6 +527,35 @@ export class RecipesService {
         if (unitCost.lte(0)) {
           hasMissingCost = true;
         }
+      } else if (item.subRecipe?.outputSupply) {
+        // Subproduto estocado custa o que custou produzi-lo, que é o custo do
+        // insumo de saída. Somar a receita de novo daria o custo de fazer um
+        // lote HOJE — número diferente do que está na geladeira.
+        const output = item.subRecipe.outputSupply;
+
+        // O custo do insumo é por unidade base; a quantidade da ficha está em
+        // unidade de rendimento. Converter 1 unidade de rendimento dá quantas
+        // unidades base ela vale, e o custo acompanha.
+        const baseUnitsPerYieldUnit = this.unitConversionService.convert(
+          1,
+          item.subRecipe.yieldUnit,
+          output.baseUnit,
+        );
+
+        unitCost = this.supplyCostingService
+          .getCurrentUnitCost(output)
+          .mul(baseUnitsPerYieldUnit);
+
+        label = output.name;
+        reference = {
+          type: 'SUB_RECIPE_STOCKED',
+          subRecipeId: item.subRecipe.id,
+          supplyId: output.id,
+        };
+
+        if (unitCost.lte(0)) {
+          hasMissingCost = true;
+        }
       } else {
         const sub = await this.loadRecipe(userId, item.subRecipeId);
         const subCost = await this.withCost(
@@ -534,11 +627,16 @@ export class RecipesService {
   // -------------------------------------------------------------------------
 
   /**
-   * Achata a ficha em consumo de insumos, expandindo sub-receitas até o fim.
+   * Achata a ficha em consumo de insumos.
    *
-   * Sub-receita não é estocada: o que sai do estoque são os insumos dela. Uma
-   * pizza que usa 100 ML de um molho que rende 4000 ML consome 1/40 dos
-   * insumos daquele molho.
+   * Uma sub-receita tem dois destinos, e é `outputSupplyId` que decide:
+   *
+   * - SEM insumo de saída, ela não existe como saldo: o desdobramento continua
+   *   até os insumos dela. Uma pizza que usa 100 ML de um molho que rende
+   *   4000 ML consome 1/40 do tomate e da cebola daquele molho.
+   * - COM insumo de saída, o molho é produzido e tem saldo próprio. O
+   *   desdobramento PARA ali e consome o molho. Continuar descendo baixaria o
+   *   tomate uma segunda vez — ele já saiu quando o lote foi produzido.
    *
    * `client` precisa ser o client da transação quando isto roda dentro de uma —
    * senão a leitura não enxerga o que a própria transação já escreveu.
@@ -580,7 +678,23 @@ export class RecipesService {
                 baseUnit: { select: { code: true } },
               },
             },
-            subRecipe: { select: { id: true, yieldQuantity: true } },
+            subRecipe: {
+              select: {
+                id: true,
+                yieldQuantity: true,
+                yieldUnit: true,
+                outputSupply: {
+                  select: {
+                    id: true,
+                    name: true,
+                    costingMethod: true,
+                    lastCost: true,
+                    averageCost: true,
+                    baseUnit: true,
+                  },
+                },
+              },
+            },
           },
         },
       },
@@ -610,6 +724,33 @@ export class RecipesService {
           quantityBase: effective,
           unitCost,
           totalCost: effective.mul(unitCost),
+          hasMissingCost: unitCost.lte(0),
+        });
+
+        continue;
+      }
+
+      // Subproduto estocado: consome o próprio molho, não os insumos dele.
+      if (item.subRecipe.outputSupply) {
+        const output = item.subRecipe.outputSupply;
+        const unitCost = this.supplyCostingService.getCurrentUnitCost(output);
+
+        // A quantidade do item está na unidade de rendimento da sub-receita;
+        // o saldo vive na unidade base do insumo de saída. Sem converter, 10 KG
+        // de molho virariam 10 G no estoque.
+        const quantityBase = this.unitConversionService.convert(
+          effective,
+          item.subRecipe.yieldUnit,
+          output.baseUnit,
+        );
+
+        collected.push({
+          supplyId: output.id,
+          supplyName: output.name,
+          baseUnitCode: output.baseUnit.code,
+          quantityBase,
+          unitCost,
+          totalCost: quantityBase.mul(unitCost),
           hasMissingCost: unitCost.lte(0),
         });
 
@@ -918,6 +1059,53 @@ export class RecipesService {
 
     // Sub-receitas não têm produto, então o nome é o que agrupa as versões.
     return { userId, productId: null, name: scope.name };
+  }
+
+  /**
+   * Valida o insumo onde o subproduto é estocado.
+   *
+   * Exige rendimento na mesma grandeza: um molho que rende em litros não pode
+   * ser estocado num insumo cuja base é grama, porque não existe conversão
+   * entre volume e massa sem saber a densidade.
+   */
+  private async resolveOutputSupply(
+    userId: string,
+    outputSupplyId: string,
+    isSubRecipe: boolean,
+    yieldUnit: MeasurementUnit | null,
+  ) {
+    if (!isSubRecipe) {
+      throw new BadRequestException(
+        'Only a sub-recipe can have an output supply: a dish is sold, not ' +
+          'stocked. Remove productId to make this a sub-recipe.',
+      );
+    }
+
+    if (!yieldUnit) {
+      throw new BadRequestException(
+        'A produced sub-recipe needs a yield unit: without it there is no way ' +
+          'to know how much of the supply one batch adds to stock.',
+      );
+    }
+
+    const supply = await this.prismaService.supply.findFirst({
+      where: { id: outputSupplyId, userId },
+      include: { baseUnit: true },
+    });
+
+    if (!supply) {
+      throw new NotFoundException(`Supply ${outputSupplyId} not found.`);
+    }
+
+    if (supply.baseUnit.kind !== yieldUnit.kind) {
+      throw new BadRequestException(
+        `Cannot store a yield measured in ${yieldUnit.code} (${yieldUnit.kind}) ` +
+          `into ${supply.name}, whose base unit is ${supply.baseUnit.code} ` +
+          `(${supply.baseUnit.kind}).`,
+      );
+    }
+
+    return supply;
   }
 
   private async resolveYieldUnit(

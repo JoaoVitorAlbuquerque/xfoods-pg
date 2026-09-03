@@ -45,6 +45,7 @@ model User {
   expenses           Expense[]
   costAllocation     CostAllocationSettings?
   pricingSettings    PricingSettings?
+  productionOrders   ProductionOrder[]
 
   @@map("users")
 }
@@ -99,9 +100,10 @@ model MeasurementUnit {
   stockCountItems        StockCountItem[]
   purchaseItems          PurchaseItem[]
   costHistoryEntries     SupplyCostHistory[]
-  suppliesAsLastPurchase Supply[]            @relation("SupplyLastPurchaseUnit")
-  recipeYields           Recipe[]            @relation("RecipeYieldUnit")
-  recipeItems            RecipeItem[]        @relation("RecipeItemUnit")
+  suppliesAsLastPurchase Supply[]              @relation("SupplyLastPurchaseUnit")
+  recipeYields           Recipe[]              @relation("RecipeYieldUnit")
+  recipeItems            RecipeItem[]          @relation("RecipeItemUnit")
+  productionItems        ProductionOrderItem[] @relation("ProductionItemUnit")
 
   @@unique([userId, code])
   @@index([userId])
@@ -289,6 +291,10 @@ model ProductOrder {
 
   @@index([orderId])
   @@index([productId])
+  // Ranking de produto agrega direto nesta tabela (SUM de quantity,
+  // total_price e recipe_total_cost agrupado por produto), sempre recortado
+  // pelo estabelecimento. Sem este índice a agregação varre o tenant inteiro.
+  @@index([userId, productId])
   @@map("product_order")
 }
 
@@ -372,6 +378,13 @@ model Supply {
   purchaseItems    PurchaseItem[]
   costHistory      SupplyCostHistory[]
 
+  /// Fichas que produzem este insumo. É uma lista porque as versões da
+  /// sub-receita apontam todas para o mesmo insumo de saída — trocar a receita
+  /// do molho não cria um molho diferente no estoque.
+  producedByRecipes Recipe[]              @relation("RecipeOutputSupply")
+  productionOutputs ProductionOrder[]     @relation("ProductionOutputSupply")
+  productionInputs  ProductionOrderItem[]
+
   @@unique([userId, name])
   @@index([userId, active])
   @@index([supplyCategoryId])
@@ -454,9 +467,16 @@ model StockMovement {
   countItem    StockCountItem?
   PurchaseItem PurchaseItem?
 
+  productionOutput ProductionOrder?     @relation("ProductionOutputMovement")
+  productionItem   ProductionOrderItem? @relation("ProductionItemMovement")
+
   @@index([userId, supplyId, occurredAt])
   @@index([userId, type])
   @@index([referenceType, referenceId])
+  // Os painéis varrem o razão por competência e agrupam por tipo ou por
+  // insumo. Os índices acima começam por insumo ou por tipo, e nenhum deles
+  // serve a "tudo do estabelecimento neste período".
+  @@index([userId, occurredAt])
   @@map("stock_movements")
 }
 
@@ -663,6 +683,9 @@ enum CostSource {
   PURCHASE
   MANUAL
   ADJUSTMENT
+  /// Custo que veio de uma ordem de produção: soma dos insumos consumidos
+  /// dividida pelo rendimento REAL daquele lote.
+  PRODUCTION
 
   @@map("cost_source")
 }
@@ -718,9 +741,18 @@ model SupplyCostHistory {
 /// explica o custo das vendas feitas enquanto valia.
 ///
 /// `productId` nulo marca uma SUB-RECEITA (molho, massa base, pré-preparo),
-/// que existe para ser usada dentro de outras fichas. Nesta fase a sub-receita
-/// só compõe custo; transformá-la em estoque próprio depende de ordem de
-/// produção, que ainda não existe.
+/// que existe para ser usada dentro de outras fichas.
+///
+/// Uma sub-receita tem dois modos, decididos por `outputSupplyId`:
+///
+/// - SEM insumo de saída: é só composição de custo. Na venda, a ficha é
+///   desdobrada até os insumos — 100 ML de molho consomem tomate e cebola
+///   proporcionalmente, porque molho não existe como saldo.
+/// - COM insumo de saída: o subproduto é PRODUZIDO e estocado. A venda passa a
+///   consumir o próprio molho, e quem repõe o saldo dele é a ordem de produção.
+///
+/// Os dois convivem: fichas antigas continuam desdobrando, e só passam a
+/// consumir estoque quando alguém decidir produzir o subproduto.
 model Recipe {
   id        String  @id @default(uuid()) @db.Uuid
   userId    String  @map("user_id") @db.Uuid
@@ -737,17 +769,24 @@ model Recipe {
   yieldQuantity Decimal @default(1) @map("yield_quantity") @db.Decimal(18, 6)
   yieldUnitId   String? @map("yield_unit_id") @db.Uuid
 
+  /// Insumo onde o subproduto desta ficha é estocado. Preenchido só em
+  /// sub-receita produzida; a unidade base dele precisa ser da mesma grandeza
+  /// do rendimento, senão não haveria como converter 10 KG de molho em saldo.
+  outputSupplyId String? @map("output_supply_id") @db.Uuid
+
   notes String?
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
-  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  product     Product?           @relation(fields: [productId], references: [id], onDelete: Cascade)
-  yieldUnit   MeasurementUnit?   @relation("RecipeYieldUnit", fields: [yieldUnitId], references: [id])
-  items       RecipeItem[]
-  usedAsSubIn RecipeItem[]       @relation("RecipeSubRecipe")
-  sizeFactors RecipeSizeFactor[]
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product      Product?           @relation(fields: [productId], references: [id], onDelete: Cascade)
+  yieldUnit    MeasurementUnit?   @relation("RecipeYieldUnit", fields: [yieldUnitId], references: [id])
+  outputSupply Supply?            @relation("RecipeOutputSupply", fields: [outputSupplyId], references: [id], onDelete: SetNull)
+  items        RecipeItem[]
+  usedAsSubIn  RecipeItem[]       @relation("RecipeSubRecipe")
+  sizeFactors  RecipeSizeFactor[]
+  productions  ProductionOrder[]
 
   /// Snapshot da ficha usada em cada item de venda (preenchido na baixa).
   productOrders ProductOrder[]
@@ -1021,4 +1060,113 @@ model PricingSettings {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("pricing_settings")
+}
+
+// ===========================================================================
+// Produção de subprodutos
+// ===========================================================================
+
+enum ProductionStatus {
+  DRAFT
+  CONFIRMED
+  CANCELED
+
+  @@map("production_status")
+}
+
+/// Ordem de produção: transforma insumos em subproduto estocado.
+///
+/// Nasce DRAFT e não encosta no estoque. Ao ser confirmada, na MESMA
+/// transação, cada ingrediente gera uma saída PRODUCTION e o subproduto gera
+/// uma entrada PRODUCTION — se qualquer etapa falhar, nada acontece. Sem isso
+/// existiria o estado em que o tomate saiu e o molho não entrou.
+model ProductionOrder {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+
+  /// Ficha usada. Guardada para o histórico saber com que receita o lote foi
+  /// feito, mesmo depois de a ficha ganhar versões novas.
+  recipeId String @map("recipe_id") @db.Uuid
+
+  /// Insumo onde o subproduto entra. Copiado da ficha no momento da criação:
+  /// se a ficha for reapontada depois, este lote continua explicando para onde
+  /// o molho daquele dia foi.
+  outputSupplyId String @map("output_supply_id") @db.Uuid
+
+  status ProductionStatus @default(DRAFT)
+
+  /// Quantas vezes a receita foi executada neste lote. Dobrar a receita dobra
+  /// ingredientes e rendimento.
+  batches Decimal @default(1) @db.Decimal(18, 6)
+
+  /// Rendimento previsto pela ficha, na unidade base do insumo de saída.
+  expectedQuantity Decimal @map("expected_quantity") @db.Decimal(18, 6)
+
+  /// Rendimento que de fato saiu. É ele que entra no estoque — não o previsto.
+  actualQuantity Decimal @map("actual_quantity") @db.Decimal(18, 6)
+
+  /// Real menos previsto, congelado. Negativo é perda de produção: reduziu de
+  /// 10 kg para 9 kg e o custo por kg subiu junto.
+  yieldDifference Decimal  @map("yield_difference") @db.Decimal(18, 6)
+  yieldPercent    Decimal? @map("yield_percent") @db.Decimal(12, 4)
+
+  /// Soma do que os ingredientes custaram neste lote, e o custo por unidade
+  /// base do subproduto — total dividido pelo rendimento REAL. Um lote que
+  /// rendeu menos carrega o mesmo custo em menos produto, e é assim que a
+  /// perda de produção aparece no preço do prato.
+  totalCost Decimal @default(0) @map("total_cost") @db.Decimal(14, 4)
+  unitCost  Decimal @default(0) @map("unit_cost") @db.Decimal(14, 6)
+
+  notes String?
+
+  producedAt  DateTime  @map("produced_at")
+  confirmedAt DateTime? @map("confirmed_at")
+  canceledAt  DateTime? @map("canceled_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user         User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recipe       Recipe                @relation(fields: [recipeId], references: [id])
+  outputSupply Supply                @relation("ProductionOutputSupply", fields: [outputSupplyId], references: [id])
+  items        ProductionOrderItem[]
+
+  /// Entrada do subproduto no estoque. Nula enquanto o lote é rascunho.
+  outputMovementId String?        @unique @map("output_movement_id") @db.Uuid
+  outputMovement   StockMovement? @relation("ProductionOutputMovement", fields: [outputMovementId], references: [id])
+
+  @@index([userId, producedAt])
+  @@index([userId, status])
+  @@index([outputSupplyId])
+  @@map("production_orders")
+}
+
+/// Ingrediente consumido por um lote, com a quantidade e o custo congelados.
+model ProductionOrderItem {
+  id                String @id @default(uuid()) @db.Uuid
+  productionOrderId String @map("production_order_id") @db.Uuid
+  supplyId          String @map("supply_id") @db.Uuid
+  unitId            String @map("unit_id") @db.Uuid
+
+  quantity     Decimal @db.Decimal(18, 6)
+  quantityBase Decimal @map("quantity_base") @db.Decimal(18, 6)
+
+  /// Custo por unidade base no momento da produção, congelado. Recalcular
+  /// depois mudaria o custo de um lote que já foi consumido.
+  unitCost  Decimal @default(0) @map("unit_cost") @db.Decimal(14, 6)
+  totalCost Decimal @default(0) @map("total_cost") @db.Decimal(14, 4)
+
+  /// Saída gerada na confirmação. Nula enquanto o lote é rascunho.
+  movementId String? @unique @map("movement_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  productionOrder ProductionOrder @relation(fields: [productionOrderId], references: [id], onDelete: Cascade)
+  supply          Supply          @relation(fields: [supplyId], references: [id])
+  unit            MeasurementUnit @relation("ProductionItemUnit", fields: [unitId], references: [id])
+  movement        StockMovement?  @relation("ProductionItemMovement", fields: [movementId], references: [id])
+
+  @@index([productionOrderId])
+  @@index([supplyId])
+  @@map("production_order_items")
 }
